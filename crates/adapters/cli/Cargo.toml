@@ -16,6 +16,7 @@ apeireth-core = { path = "../../foundation/core" }
 apeireth-credentials = { path = "../../foundation/credentials" }
 apeireth-governance = { path = "../../foundation/governance" }
 apeireth-gateway = { path = "../gateway" }
+apeireth-guard = { path = "../../engine/guard" }
 apeireth-memory = { path = "../../engine/memory" }
 apeireth-orchestration = { path = "../../foundation/orchestration" }
 apeireth-plugin = { path = "../../foundation/plugin" }

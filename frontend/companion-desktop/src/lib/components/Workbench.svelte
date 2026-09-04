@@ -79,9 +79,9 @@
           aria-expanded={open.tools}
           onclick={() => toggle('tools')}
         >
-          子代理
+          代理与执行
           {#if toolCalls.length}
-            <span class="tagn">{runningTools.length} 运行中</span>
+            <span class="tagn">{runningTools.length ? `${runningTools.length} 运行中` : `${toolCalls.length} 项工具`}</span>
           {/if}
           <ChevronRight size={13} class="shell-icon-sm caret" />
         </button>

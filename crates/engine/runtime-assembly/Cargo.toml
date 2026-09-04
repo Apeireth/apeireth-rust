@@ -18,6 +18,7 @@ apeireth-governance = { path = "../../foundation/governance" }
 apeireth-orchestration = { path = "../../foundation/orchestration" }
 apeireth-runtime = { path = "../runtime" }
 apeireth-memory = { path = "../memory" }
+apeireth-guard = { path = "../guard" }
 apeireth-organ = { path = "../organ" }
 apeireth-storage = { path = "../storage" }
 apeireth-tools-canonical = { path = "../../capabilities/tools" }

@@ -48,12 +48,18 @@ pub fn build_production_governance(enable_local_read_tools: bool) -> GovernanceP
     build_production_governance_parts(enable_local_read_tools).0
 }
 
+use apeireth_guard::BehaviorChainGuardHook;
+
 /// Build the production pipeline and return the shared policy handle alongside
 /// it, so the gateway can serve grants listing and session-scoped hot revoke
 /// against the same policy the live hooks evaluate.
 pub fn build_production_governance_parts(
     enable_local_read_tools: bool,
-) -> (GovernancePipeline, Arc<std::sync::Mutex<PermissionPolicy>>) {
+) -> (
+    GovernancePipeline,
+    Arc<std::sync::Mutex<PermissionPolicy>>,
+    Arc<BehaviorChainGuardHook>,
+) {
     let mut policy = PermissionPolicy::new();
     policy.grant(Permission::ExecuteTool("tool.repo".to_string()));
     if enable_local_read_tools {
@@ -61,14 +67,16 @@ pub fn build_production_governance_parts(
         policy.grant(Permission::ExecuteTool("tool.search".to_string()));
     }
     let policy = Arc::new(std::sync::Mutex::new(policy));
+    let guard_hook = Arc::new(BehaviorChainGuardHook::new());
 
     let pipeline = GovernancePipeline::new()
         .with(Arc::new(PermissionGovernanceHook::new_shared(
             policy.clone(),
         )))
         .with(Arc::new(CredentialDisclosureHook::new()))
-        .with(Arc::new(PromptInjectionHook::new()));
-    (pipeline, policy)
+        .with(Arc::new(PromptInjectionHook::new()))
+        .with(guard_hook.clone());
+    (pipeline, policy, guard_hook)
 }
 
 /// Build the production governance policy using the process environment.
@@ -83,8 +91,11 @@ pub fn build_production_governance_from_env() -> GovernancePipeline {
     build_production_governance(enable_local_read_tools)
 }
 
-fn build_production_governance_parts_from_env(
-) -> (GovernancePipeline, Arc<std::sync::Mutex<PermissionPolicy>>) {
+fn build_production_governance_parts_from_env() -> (
+    GovernancePipeline,
+    Arc<std::sync::Mutex<PermissionPolicy>>,
+    Arc<BehaviorChainGuardHook>,
+) {
     let enable_local_read_tools = std::env::var(ENABLE_LOCAL_READ_TOOLS_ENV)
         .ok()
         .is_some_and(|value| value.trim() == "1");
@@ -96,7 +107,7 @@ fn build_production_governance_parts_from_env(
 /// Provider implementations are injected as plugins. Credentials are resolved
 /// at execution time, so neither the runtime nor a provider stores API keys.
 pub async fn build_canonical_runtime_from_env() -> Result<Runtime, String> {
-    let (runtime, _, _, _) = build_canonical_runtime_with_sessions_from_env().await?;
+    let (runtime, _, _, _, _) = build_canonical_runtime_with_sessions_from_env().await?;
     Ok(runtime)
 }
 
@@ -110,22 +121,30 @@ pub async fn build_canonical_runtime_with_sessions_from_env() -> Result<
         Arc<dyn SessionStore>,
         Arc<dyn MemoryBackend>,
         Arc<std::sync::Mutex<PermissionPolicy>>,
+        Arc<BehaviorChainGuardHook>,
     ),
     String,
 > {
     let session_store = production_session_store().await?;
     let clock: Arc<dyn apeireth_core::kernel::Clock> = apeireth_core::kernel::system_clock();
     let (cognitive, memory) = build_cognitive_modules_from_env(Arc::clone(&clock)).await?;
-    let (runtime, policy) =
+    let (runtime, policy, guard_hook) =
         build_canonical_runtime_with_parts(session_store.clone(), cognitive, clock).await?;
-    Ok((runtime, session_store, memory, policy))
+    Ok((runtime, session_store, memory, policy, guard_hook))
 }
 
 async fn build_canonical_runtime_with_parts(
     session_store: Arc<dyn SessionStore>,
     cognitive: apeireth_runtime_assembly::ProductionCognitiveModules,
     clock: Arc<dyn apeireth_core::kernel::Clock>,
-) -> Result<(Runtime, Arc<std::sync::Mutex<PermissionPolicy>>), String> {
+) -> Result<
+    (
+        Runtime,
+        Arc<std::sync::Mutex<PermissionPolicy>>,
+        Arc<BehaviorChainGuardHook>,
+    ),
+    String,
+> {
     use apeireth_provider::canonical_anthropic::AnthropicProviderPlugin;
     use apeireth_provider::canonical_minimax::MinimaxProviderPlugin;
     use apeireth_provider::canonical_openai_compatible::OpenAiCompatibleProviderPlugin;
@@ -141,7 +160,7 @@ async fn build_canonical_runtime_with_parts(
     let resolver: Arc<dyn apeireth_plugin::CredentialResolver> =
         keyring_bootstrap::build_keyring_resolver();
     builder = builder.with_credentials(resolver);
-    let (governance, policy) = build_production_governance_parts_from_env();
+    let (governance, policy, guard_hook) = build_production_governance_parts_from_env();
     builder = builder.with_governance(Arc::new(governance));
     builder = builder.with_session_store(session_store);
 
@@ -184,7 +203,7 @@ async fn build_canonical_runtime_with_parts(
         .build()
         .await
         .map_err(|error| format!("canonical runtime bootstrap failed: {error}"))?;
-    Ok((runtime, policy))
+    Ok((runtime, policy, guard_hook))
 }
 
 async fn production_session_store() -> Result<Arc<dyn apeireth_runtime::SessionStore>, String> {
@@ -203,7 +222,7 @@ async fn production_session_store() -> Result<Arc<dyn apeireth_runtime::SessionS
 /// observable and durable through the gateway bounded-context ports.
 async fn build_canonical_runtime_from_env_with_observability(
 ) -> Result<(Arc<Runtime>, Arc<apeireth_gateway::RuntimeObservationSink>), String> {
-    let (runtime, sessions, memory, policy) =
+    let (runtime, sessions, memory, policy, guard_hook) =
         build_canonical_runtime_with_sessions_from_env().await?;
     let runtime = Arc::new(runtime);
     let governance = Arc::new(
@@ -213,15 +232,18 @@ async fn build_canonical_runtime_from_env_with_observability(
     let enable_local_read_tools = std::env::var(ENABLE_LOCAL_READ_TOOLS_ENV)
         .ok()
         .is_some_and(|value| value.trim() == "1");
-    let panel = Arc::new(crate::gateway_panels::CliPanelData::new_with_runtime(
-        Arc::clone(&runtime),
-        sessions,
-        memory,
-        governance,
-        policy,
-        enable_local_read_tools,
-        default_panel_data_dir(),
-    ));
+    let panel = Arc::new(
+        crate::gateway_panels::CliPanelData::new_with_runtime(
+            Arc::clone(&runtime),
+            sessions,
+            memory,
+            governance,
+            policy,
+            enable_local_read_tools,
+            default_panel_data_dir(),
+        )
+        .with_guard(guard_hook),
+    );
     let services = crate::gateway_panels::gateway_services(panel);
     let observer = Arc::new(apeireth_gateway::RuntimeObservationSink::new(
         services.trace_commands.clone(),
@@ -446,7 +468,7 @@ pub async fn dispatch_gateway_serve(port: u16) -> Result<String, String> {
 /// Loopback is the safe default. Binding a non-loopback address is an
 /// intentional operator decision and is called out before the listener starts.
 pub async fn dispatch_gateway_serve_on(bind: &str, port: u16) -> Result<String, String> {
-    let (runtime, sessions, memory, policy) =
+    let (runtime, sessions, memory, policy, guard_hook) =
         build_canonical_runtime_with_sessions_from_env().await?;
     let runtime = Arc::new(runtime);
     let governance = Arc::new(
@@ -456,15 +478,18 @@ pub async fn dispatch_gateway_serve_on(bind: &str, port: u16) -> Result<String, 
     let enable_local_read_tools = std::env::var(ENABLE_LOCAL_READ_TOOLS_ENV)
         .ok()
         .is_some_and(|value| value.trim() == "1");
-    let panel = Arc::new(crate::gateway_panels::CliPanelData::new_with_runtime(
-        Arc::clone(&runtime),
-        sessions,
-        memory,
-        governance,
-        policy,
-        enable_local_read_tools,
-        default_panel_data_dir(),
-    ));
+    let panel = Arc::new(
+        crate::gateway_panels::CliPanelData::new_with_runtime(
+            Arc::clone(&runtime),
+            sessions,
+            memory,
+            governance,
+            policy,
+            enable_local_read_tools,
+            default_panel_data_dir(),
+        )
+        .with_guard(guard_hook),
+    );
     let services = crate::gateway_panels::gateway_services(panel);
     let address = format!("{bind}:{port}");
     let listener = tokio::net::TcpListener::bind(&address)

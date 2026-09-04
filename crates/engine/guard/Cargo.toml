@@ -1,0 +1,27 @@
+[package]
+name = "apeireth-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Two-stage behavior-chain safety classifier for the Apeireth runtime governance"
+
+[dependencies]
+apeireth-core = { path = "../../foundation/core" }
+apeireth-governance = { path = "../../foundation/governance" }
+apeireth-protocol = { path = "../../foundation/protocol" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

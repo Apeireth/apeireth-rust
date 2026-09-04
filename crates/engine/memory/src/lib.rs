@@ -288,6 +288,22 @@ pub use streams::{
 };
 pub use three_layer::{ThreeLayerMemory, SHORT_TERM_WINDOW_SECS, WORKING_CAPACITY}; // R30 U9
 
+// Unified Memory 2.0 (coordinator, 4-layer architecture, closed-world prompt injection)
+pub mod consolidation;
+pub mod context_compiler;
+pub mod continuity_state;
+pub mod coordinator;
+pub mod layers;
+
+pub use consolidation::{ConsolidationReport, MemoryConsolidationJob};
+pub use context_compiler::ClosedWorldContextCompiler;
+pub use continuity_state::{ContinuityCompressor, ContinuityState};
+pub use coordinator::MemoryCoordinator;
+pub use layers::{
+    MemoryLayerKind, MemoryRecallQuery, MemoryRecallResult, MemoryWritebackEntry,
+    RecalledMemoryItem,
+};
+
 /// 重新导出 `apeireth_core::kernel::memory::Episode` 方便下游不必记多个导入路径.
 pub use apeireth_core::kernel::memory::Episode as CoreEpisode;
 // R177: organ invariants (10 tests + 2 Kani proofs)
@@ -452,6 +468,63 @@ impl ContinuitySnapshotStore for SqliteMemoryStore {
 
     fn recent_episodes(&self, session_id: &str, n: usize) -> anyhow::Result<Vec<Episode>> {
         <Self as EpisodeStore>::recent_episodes(self, session_id, n).map_err(Into::into)
+    }
+}
+
+impl apeireth_plugin::memory_backend::MemoryBackend for SqliteMemoryStore {
+    fn name(&self) -> &'static str {
+        "sqlite_store"
+    }
+
+    fn kind(&self) -> apeireth_plugin::memory_backend::BackendKind {
+        apeireth_plugin::memory_backend::BackendKind::Sqlite
+    }
+
+    fn put_episode(&self, ep: &Episode) -> apeireth_plugin::memory_backend::CapabilityResult<()> {
+        <Self as EpisodeStore>::put_episode(self, ep)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    fn get_episode(
+        &self,
+        id: &str,
+    ) -> apeireth_plugin::memory_backend::CapabilityResult<Option<Episode>> {
+        <Self as EpisodeStore>::get_episode(self, id)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    fn recent_episodes(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> apeireth_plugin::memory_backend::CapabilityResult<Vec<Episode>> {
+        <Self as EpisodeStore>::recent_episodes(self, session_id, n)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    fn append_stream(
+        &self,
+        kind: StreamKind,
+        entry: HistoryEntry,
+    ) -> apeireth_plugin::memory_backend::CapabilityResult<()> {
+        let conn = self
+            .conn()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        append_only::insert_entry(&conn, kind.table_name_ext(), &entry)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    fn list_stream(
+        &self,
+        kind: StreamKind,
+        _session_id: &str,
+        n: usize,
+    ) -> apeireth_plugin::memory_backend::CapabilityResult<Vec<HistoryEntry>> {
+        let conn = self
+            .conn()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        append_only::list_recent_entries(&conn, kind.table_name_ext(), n, false)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 

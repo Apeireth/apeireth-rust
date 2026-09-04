@@ -117,9 +117,15 @@
             <p class="text-xs text-slate-400">{state.statusText}</p>
           </div>
         </div>
-        <span class="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-400 border border-emerald-500/20">
-          ● 实时双向流
+        <span class="inline-flex items-center rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-400 border border-amber-500/20">
+          ● 未组装 (not_assembled)
         </span>
+      </div>
+
+      <!-- Not Assembled Degradation Notice -->
+      <div class="my-3 rounded-xl bg-amber-500/10 border border-amber-500/20 p-3 text-left">
+        <p class="text-xs text-amber-200 font-medium">全双工实时语音流服务尚未组装</p>
+        <p class="text-xs text-slate-400 mt-1">当前发行版运行时专注于微内核、行为链安全 Guard 与统一记忆架构。全双工语音服务已在 Capability Manifest 中如实标记为 <code>not_assembled</code>。</p>
       </div>
 
       <!-- Center Audio Visualizer Canvas -->
@@ -143,7 +149,7 @@
         {#if state.transcript}
           <p class="italic">"{state.transcript}"</p>
         {:else}
-          <p class="text-slate-500">正在等待语音输入（直接说话即可打断）...</p>
+          <p class="text-slate-500">语音流服务暂未组装，请使用文本对话与工作台执行。</p>
         {/if}
       </div>
 

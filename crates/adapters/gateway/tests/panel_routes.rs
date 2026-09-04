@@ -592,6 +592,35 @@ async fn panel_routes_serve_contract_shapes() {
     );
     assert_eq!(find_group("organs")["capabilities"][0]["id"], "organs.list");
     assert_eq!(find_group("organs")["capabilities"][0]["supported"], true);
+
+    let safety = find_group("safety");
+    let safety_caps = safety["capabilities"].as_array().unwrap();
+    assert!(safety_caps
+        .iter()
+        .any(|c| c["id"] == "safety.guard.status.read"));
+    assert!(safety_caps
+        .iter()
+        .any(|c| c["id"] == "safety.guard.events.read"));
+    assert!(safety_caps
+        .iter()
+        .any(|c| c["id"] == "safety.guard.evaluate"));
+
+    let workbench = find_group("workbench");
+    assert_eq!(workbench["capabilities"][0]["id"], "workbench.turn.read");
+
+    let voice = find_group("voice");
+    let voice_duplex = &voice["capabilities"][0];
+    assert_eq!(voice_duplex["id"], "voice.duplex");
+    assert_eq!(voice_duplex["supported"], false);
+    assert_eq!(voice_duplex["available"], false);
+    assert_eq!(voice_duplex["reason"], "not_assembled");
+
+    let subagents = find_group("subagents");
+    let subagents_cap = &subagents["capabilities"][0];
+    assert_eq!(subagents_cap["id"], "subagents.orchestration");
+    assert_eq!(subagents_cap["supported"], false);
+    assert_eq!(subagents_cap["available"], false);
+    assert_eq!(subagents_cap["reason"], "not_assembled");
 }
 
 #[tokio::test]
@@ -630,6 +659,59 @@ async fn panel_routes_degrade_to_501_without_backends() {
     let organs = router.clone().oneshot(get("/v1/organs")).await.unwrap();
     assert_eq!(organs.status(), StatusCode::NOT_IMPLEMENTED);
 
+    let guard_status = router
+        .clone()
+        .oneshot(get("/v1/safety/guard/status"))
+        .await
+        .unwrap();
+    assert_eq!(guard_status.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = body_json(guard_status).await;
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("safety.guard.status.read"));
+
+    let guard_events = router
+        .clone()
+        .oneshot(get("/v1/safety/guard/events"))
+        .await
+        .unwrap();
+    assert_eq!(guard_events.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let guard_eval = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/safety/guard/evaluate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "capability_id": "tool.shell",
+                        "arguments": { "command": "ls" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(guard_eval.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let wb = router
+        .clone()
+        .oneshot(get("/v1/workbench/turn"))
+        .await
+        .unwrap();
+    assert_eq!(wb.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = body_json(wb).await;
+    assert_eq!(body["error"]["code"], "unsupported");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("workbench.turn.read"));
+
     // The manifest stays available and honest even without backends.
     let caps = body_json(
         router
@@ -644,4 +726,8 @@ async fn panel_routes_degrade_to_501_without_backends() {
     assert_eq!(sessions["capabilities"][0]["supported"], false);
     let memory_group = groups.iter().find(|g| g["name"] == "memory").unwrap();
     assert_eq!(memory_group["capabilities"][0]["supported"], false);
+    let safety_group = groups.iter().find(|g| g["name"] == "safety").unwrap();
+    assert_eq!(safety_group["capabilities"][0]["supported"], false);
+    let wb_group = groups.iter().find(|g| g["name"] == "workbench").unwrap();
+    assert_eq!(wb_group["capabilities"][0]["supported"], false);
 }

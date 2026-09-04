@@ -10,6 +10,7 @@ members = [
     "crates/foundation/orchestration",
     "crates/engine/runtime",
     "crates/engine/runtime-assembly",
+    "crates/engine/guard",
     "crates/engine/provider",
     "crates/engine/storage",
     "crates/engine/memory",

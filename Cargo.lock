@@ -153,6 +153,7 @@ dependencies = [
  "apeireth-credentials",
  "apeireth-gateway",
  "apeireth-governance",
+ "apeireth-guard",
  "apeireth-memory",
  "apeireth-orchestration",
  "apeireth-plugin",
@@ -207,6 +208,7 @@ version = "2.0.0-rc.1"
 dependencies = [
  "apeireth-core",
  "apeireth-governance",
+ "apeireth-guard",
  "apeireth-plugin",
  "apeireth-protocol",
  "apeireth-provider",
@@ -235,6 +237,23 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "apeireth-guard"
+version = "2.0.0-rc.1"
+dependencies = [
+ "apeireth-core",
+ "apeireth-governance",
+ "apeireth-protocol",
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -375,6 +394,7 @@ version = "2.0.0-rc.1"
 dependencies = [
  "apeireth-core",
  "apeireth-governance",
+ "apeireth-guard",
  "apeireth-memory",
  "apeireth-orchestration",
  "apeireth-organ",

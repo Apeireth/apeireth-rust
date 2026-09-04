@@ -47,7 +47,9 @@ pub use events::{events_handler, EventBus, GatewayEvent, RuntimeObservationSink}
 pub use panels::{
     AuditCommand, AuditDto, AuditQuery, EpisodeDto, EpisodeMutationDto, GatewayServices,
     GatewayState, GrantCommand, GrantDto, GrantMutationDto, GrantQuery, GraphEdgeDto, GraphNodeDto,
-    MemoryCommand, MemoryGovernanceCommand, MemoryGraphDto, MemoryQuery, ModuleQuery, OrganDto,
-    PanelData, SessionQuery, SessionSummaryDto, ToolCatalogQuery, ToolDto, TraceCommand,
-    TraceDetailDto, TraceQuery, TraceSpanDto, TraceSummaryDto,
+    GuardDryRunRequest, GuardDryRunResponse, GuardEventDto, GuardStatusDto, MemoryCommand,
+    MemoryGovernanceCommand, MemoryGraphDto, MemoryQuery, ModuleQuery, OrganDto, PanelData,
+    SafetyGuardQuery, SessionQuery, SessionSummaryDto, ToolCatalogQuery, ToolDto, TraceCommand,
+    TraceDetailDto, TraceQuery, TraceSpanDto, TraceSummaryDto, WorkbenchMemoryProvenanceDto,
+    WorkbenchQuery, WorkbenchToolExecutionDto, WorkbenchTurnDto,
 };

@@ -26,6 +26,11 @@ import type {
   ApprovalRequestItem,
   CapabilityManifest,
   Capability,
+  GuardStatus,
+  GuardEvent,
+  GuardDryRunRequest,
+  GuardDryRunResponse,
+  WorkbenchTurn,
 } from './types';
 import {recordCallLog} from './call-logger.ts';
 
@@ -1993,6 +1998,76 @@ export async function fetchTraceDetail(config: ApeirethConfig, traceId: string):
     }
     const data = (await res.json()) as {spans?: TraceSpanItem[]};
     return data.spans || [];
+  } catch (caught) {
+    return {error: caught instanceof Error ? caught.message : String(caught)};
+  }
+}
+
+// --- Safety Guard & Workbench ---
+
+export async function fetchGuardStatus(config: ApeirethConfig): Promise<GuardStatus | {error: string}> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/v1/safety/guard/status`, {
+      headers: config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {},
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as {error?: {message?: string}};
+      return {error: err.error?.message || `HTTP ${res.status}`};
+    }
+    return (await res.json()) as GuardStatus;
+  } catch (caught) {
+    return {error: caught instanceof Error ? caught.message : String(caught)};
+  }
+}
+
+export async function fetchGuardEvents(config: ApeirethConfig, limit = 50): Promise<GuardEvent[] | {error: string}> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/v1/safety/guard/events?limit=${limit}`, {
+      headers: config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {},
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as {error?: {message?: string}};
+      return {error: err.error?.message || `HTTP ${res.status}`};
+    }
+    const data = (await res.json()) as {events?: GuardEvent[]};
+    return data.events || [];
+  } catch (caught) {
+    return {error: caught instanceof Error ? caught.message : String(caught)};
+  }
+}
+
+export async function evaluateGuard(config: ApeirethConfig, req: GuardDryRunRequest): Promise<GuardDryRunResponse | {error: string}> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/v1/safety/guard/evaluate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {}),
+      },
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as {error?: {message?: string}};
+      return {error: err.error?.message || `HTTP ${res.status}`};
+    }
+    return (await res.json()) as GuardDryRunResponse;
+  } catch (caught) {
+    return {error: caught instanceof Error ? caught.message : String(caught)};
+  }
+}
+
+export async function fetchWorkbenchTurn(config: ApeirethConfig, sessionId?: string): Promise<WorkbenchTurn | null | {error: string}> {
+  try {
+    const query = sessionId ? `?session=${encodeURIComponent(sessionId)}` : '';
+    const res = await fetch(`${normalizeBaseUrl(config.baseUrl)}/v1/workbench/turn${query}`, {
+      headers: config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {},
+    });
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as {error?: {message?: string}};
+      return {error: err.error?.message || `HTTP ${res.status}`};
+    }
+    const data = (await res.json()) as {turn?: WorkbenchTurn | null};
+    return data.turn ?? null;
   } catch (caught) {
     return {error: caught instanceof Error ? caught.message : String(caught)};
   }

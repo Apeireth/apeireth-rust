@@ -328,3 +328,67 @@ export function importanceStars(value: number): 1 | 2 | 3 {
   if (value >= 0.4) return 2;
   return 1;
 }
+
+export interface GuardStatus {
+  enabled: boolean;
+  fast_guard_active: boolean;
+  chain_guard_active: boolean;
+  active_chains: number;
+  total_evaluations: number;
+  total_allowed: number;
+  total_denied: number;
+  total_approval_required: number;
+  dataset_recording_enabled: boolean;
+}
+
+export interface GuardEvent {
+  timestamp_ms: number;
+  session_id: string;
+  trace_id: string;
+  round: number;
+  capability_id: string;
+  stage: 'fast_guard' | 'chain_guard';
+  decision: string;
+  risk_score: number;
+  reasons: string[];
+  evidence: string[];
+}
+
+export interface GuardDryRunRequest {
+  session_id?: string;
+  capability_id: string;
+  arguments: unknown;
+  declared_scope?: string;
+}
+
+export interface GuardDryRunResponse {
+  decision: string;
+  stage: 'fast_guard' | 'chain_guard';
+  risk_score: number;
+  reasons: string[];
+  evidence: string[];
+}
+
+export interface WorkbenchToolExecution {
+  id: string;
+  name: string;
+  status: string;
+  latency_ms?: number;
+  error?: string;
+}
+
+export interface WorkbenchMemoryProvenance {
+  recalled_count: number;
+  governance_filtered: number;
+  layers: string[];
+}
+
+export interface WorkbenchTurn {
+  session_id: string;
+  goal: string;
+  agent_status: string;
+  tools: WorkbenchToolExecution[];
+  memory: WorkbenchMemoryProvenance;
+  guard_verdict?: string;
+  updated_at: number;
+}

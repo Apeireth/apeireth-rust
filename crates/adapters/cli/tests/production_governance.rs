@@ -82,7 +82,8 @@ async fn default_production_policy_is_deny_by_default_with_repo_only() {
         [
             "permission_governance",
             "input_security.credential_disclosure",
-            "input_security.prompt_injection"
+            "input_security.prompt_injection",
+            "behavior_chain_guard",
         ]
     );
 

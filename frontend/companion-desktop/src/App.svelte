@@ -105,7 +105,7 @@
     logs: {
       eyebrow: '观察与审计',
       title: '活动与调用日志',
-      sub: '每一轮交互的延迟、Token、Prompt 与 CoT 思考流。',
+      sub: '每一轮交互的延迟、Token、执行事件与工具调用轨迹。',
       action: '',
     },
     settings: {
@@ -1350,9 +1350,16 @@
             <p class="sug-note">若干个性化条目 · 由近期记忆与对话生成</p>
             <div class="orbar">或者</div>
             <div class="calls">
-              <button class="call" onclick={openVoiceCall}>
+              <button
+                class="call"
+                onclick={openVoiceCall}
+                title={capabilityAvailable(capabilities, 'voice.duplex') ? '开始语音通话' : '全双工语音服务尚未组装 (not_assembled)'}
+              >
                 <PhoneCall size={13} />
                 语音通话
+                {#if !capabilityAvailable(capabilities, 'voice.duplex')}
+                  <span style="opacity: 0.6; font-size: 11px;">(未组装)</span>
+                {/if}
               </button>
             </div>
           </section>

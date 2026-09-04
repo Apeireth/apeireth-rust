@@ -21,9 +21,11 @@ use apeireth_core::Episode;
 use apeireth_gateway::{
     AuditCommand, AuditDto, AuditQuery, EpisodeDto, EpisodeMutationDto, GatewayServices,
     GrantCommand, GrantDto, GrantMutationDto, GrantQuery, GraphEdgeDto, GraphNodeDto,
-    MemoryCommand, MemoryGovernanceCommand, MemoryGraphDto, MemoryQuery, ModuleQuery, OrganDto,
-    PanelData, SessionQuery, SessionSummaryDto, ToolCatalogQuery, ToolDto, TraceCommand,
-    TraceDetailDto, TraceQuery, TraceSpanDto, TraceSummaryDto,
+    GuardDryRunRequest, GuardDryRunResponse, GuardEventDto, GuardStatusDto, MemoryCommand,
+    MemoryGovernanceCommand, MemoryGraphDto, MemoryQuery, ModuleQuery, OrganDto, PanelData,
+    SafetyGuardQuery, SessionQuery, SessionSummaryDto, ToolCatalogQuery, ToolDto, TraceCommand,
+    TraceDetailDto, TraceQuery, TraceSpanDto, TraceSummaryDto, WorkbenchMemoryProvenanceDto,
+    WorkbenchQuery, WorkbenchToolExecutionDto, WorkbenchTurnDto,
 };
 use apeireth_governance::{Permission, PermissionPolicy};
 use apeireth_memory::{GovernedEpisode, MemoryGovernanceStore};
@@ -68,6 +70,7 @@ pub struct CliPanelData {
     traces: std::sync::Mutex<Vec<TraceDetailDto>>,
     audit: std::sync::Mutex<Vec<AuditDto>>,
     flags: std::sync::Mutex<HashMap<String, FlagEntry>>,
+    guard_hook: Option<Arc<apeireth_guard::BehaviorChainGuardHook>>,
 }
 
 impl CliPanelData {
@@ -102,7 +105,14 @@ impl CliPanelData {
             traces: std::sync::Mutex::new(traces),
             audit: std::sync::Mutex::new(audit),
             flags: std::sync::Mutex::new(flags),
+            guard_hook: None,
         }
+    }
+
+    /// Attach a safety guard hook for telemetry and dry-run queries.
+    pub fn with_guard(mut self, guard: Arc<apeireth_guard::BehaviorChainGuardHook>) -> Self {
+        self.guard_hook = Some(guard);
+        self
     }
 
     /// Build the production panel projection from the live runtime assembly.
@@ -960,8 +970,131 @@ impl ModuleQuery for CliPanelData {
     }
 }
 
+#[async_trait]
+impl SafetyGuardQuery for CliPanelData {
+    async fn status(&self) -> Result<GuardStatusDto, String> {
+        let Some(guard) = &self.guard_hook else {
+            return Err("safety guard not configured".into());
+        };
+        Ok(guard.status())
+    }
+
+    async fn recent_events(&self, limit: usize) -> Result<Vec<GuardEventDto>, String> {
+        let Some(guard) = &self.guard_hook else {
+            return Err("safety guard not configured".into());
+        };
+        Ok(guard.recent_events(Some(limit)))
+    }
+
+    async fn dry_run(&self, req: GuardDryRunRequest) -> Result<GuardDryRunResponse, String> {
+        let Some(guard) = &self.guard_hook else {
+            return Err("safety guard not configured".into());
+        };
+        Ok(guard.dry_run(&req))
+    }
+}
+
+#[async_trait]
+impl WorkbenchQuery for CliPanelData {
+    async fn turn_status(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Option<WorkbenchTurnDto>, String> {
+        let session = match session_id {
+            Some(id) => match id.parse::<apeireth_core::kernel::SessionId>() {
+                Ok(sid) => self.sessions.load(&sid).await.map_err(errstr)?,
+                Err(_) => None,
+            },
+            None => {
+                let all = self.sessions.list().await.map_err(errstr)?;
+                all.into_iter().max_by_key(|s| s.updated_at.epoch_millis())
+            }
+        };
+
+        let Some(session) = session else {
+            return Ok(None);
+        };
+
+        let goal = session_title(&session).unwrap_or_else(|| "新会话".to_string());
+        let session_str = session.id.to_string();
+
+        let traces = self.traces.lock().map_err(errstr)?;
+        let trace = traces
+            .iter()
+            .find(|t| {
+                t.spans
+                    .iter()
+                    .any(|s| s.session_id.as_deref() == Some(&session_str))
+            })
+            .or_else(|| traces.first());
+
+        let mut tools = Vec::new();
+        let mut recalled_count = 0;
+        let mut layers = Vec::new();
+
+        if let Some(trace) = trace {
+            for span in &trace.spans {
+                if span.kind == "tool" || span.actor == "tool" || span.actor == "capability" {
+                    let latency = span
+                        .ended_at
+                        .map(|end| end.saturating_sub(span.started_at) as u64);
+                    tools.push(WorkbenchToolExecutionDto {
+                        id: span.span_id.clone(),
+                        name: span.summary.clone().unwrap_or_else(|| span.actor.clone()),
+                        status: span.status.clone(),
+                        latency_ms: latency,
+                        error: if span.status == "error" || span.status == "failed" {
+                            Some("tool execution failed".into())
+                        } else {
+                            None
+                        },
+                    });
+                }
+                if span.actor == "memory" || span.kind == "memory_recall" {
+                    recalled_count += 1;
+                    if !layers.contains(&span.actor) {
+                        layers.push(span.actor.clone());
+                    }
+                }
+            }
+        }
+
+        if layers.is_empty() {
+            layers.push("episodic".to_string());
+            layers.push("working".to_string());
+        }
+
+        let mut guard_verdict = None;
+        if let Some(guard) = &self.guard_hook {
+            let events = guard.recent_events(Some(20));
+            if let Some(ev) = events.iter().find(|e| e.session_id == session_str) {
+                guard_verdict = Some(ev.decision.clone());
+            }
+        }
+
+        Ok(Some(WorkbenchTurnDto {
+            session_id: session.id.to_string(),
+            goal,
+            agent_status: "idle".to_string(),
+            tools,
+            memory: WorkbenchMemoryProvenanceDto {
+                recalled_count,
+                governance_filtered: 0,
+                layers,
+            },
+            guard_verdict,
+            updated_at: session.updated_at.epoch_millis(),
+        }))
+    }
+}
+
 /// Build the gateway service graph from one live CLI composition root.
 pub fn gateway_services(panel: Arc<CliPanelData>) -> GatewayServices {
+    let safety_guard: Option<Arc<dyn SafetyGuardQuery>> = if panel.guard_hook.is_some() {
+        Some(panel.clone() as Arc<dyn SafetyGuardQuery>)
+    } else {
+        None
+    };
     GatewayServices {
         sessions: Some(panel.clone() as Arc<dyn SessionQuery>),
         memory: Some(panel.clone() as Arc<dyn MemoryQuery>),
@@ -974,6 +1107,8 @@ pub fn gateway_services(panel: Arc<CliPanelData>) -> GatewayServices {
         audit_commands: Some(panel.clone() as Arc<dyn AuditCommand>),
         grants: Some(panel.clone() as Arc<dyn GrantQuery>),
         grant_commands: Some(panel.clone() as Arc<dyn GrantCommand>),
-        modules: Some(panel as Arc<dyn ModuleQuery>),
+        modules: Some(panel.clone() as Arc<dyn ModuleQuery>),
+        safety_guard,
+        workbench: Some(panel as Arc<dyn WorkbenchQuery>),
     }
 }

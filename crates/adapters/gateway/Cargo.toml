@@ -21,6 +21,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 apeireth-core = { path = "../../foundation/core" }
 apeireth-protocol = { path = "../../foundation/protocol" }
 apeireth-runtime = { path = "../../engine/runtime" }
+apeireth-guard = { path = "../../engine/guard" }
 sha2 = { workspace = true }
 
 [dev-dependencies]
