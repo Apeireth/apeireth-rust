@@ -153,6 +153,10 @@ pub struct GovernanceRequest<'a> {
     /// A hook can use this to bound runaway tool loops, which is the most common
     /// reason a turn needs stopping without anything being individually unsafe.
     pub round: u32,
+    /// Optional caller-supplied identity for the concrete action being
+    /// evaluated (normally the provider/tool call id).  Completion requests
+    /// may leave this unset; hooks then derive a deterministic identity.
+    pub action_id: Option<&'a str>,
 }
 
 impl<'a> GovernanceRequest<'a> {
@@ -163,7 +167,16 @@ impl<'a> GovernanceRequest<'a> {
             session,
             trace,
             round,
+            action_id: None,
         }
+    }
+
+    /// Bind the governance request to the concrete action identity known by
+    /// the runtime at dispatch time.
+    #[must_use]
+    pub const fn with_action_id(mut self, action_id: &'a str) -> Self {
+        self.action_id = Some(action_id);
+        self
     }
 }
 

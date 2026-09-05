@@ -48,7 +48,9 @@ use serde::Serialize;
 use super::approval::PendingApprovalView;
 use super::capability::CapabilityRegistry;
 use super::error::{RuntimeError, RuntimeResult};
-use super::events::{NoopRuntimeEventSink, RuntimeEvent, RuntimeEventSink};
+use super::events::{
+    CompositeRuntimeEventSink, NoopRuntimeEventSink, RuntimeEvent, RuntimeEventSink,
+};
 use super::module::{BehaviorModule, BehaviorRegistry, DEFAULT_MAX_MODULE_INVOCATIONS};
 use super::provider::ProviderRouter;
 use super::session::{InMemorySessionStore, SessionManager, SessionStore};
@@ -314,6 +316,22 @@ impl Runtime {
             .event_sink
             .write()
             .expect("runtime event sink poisoned") = sink;
+    }
+
+    /// Add an observer while preserving sinks installed by another
+    /// composition root. Gateway setup uses this so dataset/audit observers
+    /// attached during runtime bootstrap are not silently discarded.
+    pub fn add_event_sink(&self, sink: Arc<dyn RuntimeEventSink>) {
+        let existing = self
+            .event_sink
+            .read()
+            .expect("runtime event sink poisoned")
+            .clone();
+        *self
+            .event_sink
+            .write()
+            .expect("runtime event sink poisoned") =
+            Arc::new(CompositeRuntimeEventSink::new(vec![existing, sink]));
     }
 
     pub(crate) fn emit_event(&self, event: RuntimeEvent) {

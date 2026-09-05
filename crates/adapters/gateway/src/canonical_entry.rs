@@ -422,7 +422,7 @@ pub fn build_gateway_state_with_services(
         services.trace_commands.clone(),
         services.audit_commands.clone(),
     ));
-    runtime.set_event_sink(Arc::new(
+    runtime.add_event_sink(Arc::new(
         apeireth_runtime::canonical::CompositeRuntimeEventSink::new(vec![
             Arc::new(events.clone()),
             observations.clone(),

@@ -21,6 +21,7 @@ use apeireth_governance::{
     CredentialDisclosureHook, GovernancePipeline, Permission, PermissionGovernanceHook,
     PermissionPolicy, PromptInjectionHook,
 };
+use apeireth_guard::DatasetRecorder;
 use apeireth_plugin::memory_backend::MemoryBackend;
 use apeireth_runtime::canonical::{
     ApprovalDecision, ApprovalResolution, PendingApprovalView, Runtime, SessionStore, TurnOutcome,
@@ -34,6 +35,10 @@ const COGNITIVE_DB_ENV: &str = "APEIRETH_COGNITIVE_DB";
 const SESSION_DB_ENV: &str = "APEIRETH_SESSION_DB";
 const COGNITIVE_JUDGE_ENV: &str = "APEIRETH_COGNITIVE_JUDGE";
 const COGNITIVE_COUNCIL_ENV: &str = "APEIRETH_COGNITIVE_COUNCIL";
+/// Enables the desensitized Guard dataset event stream when set to `1`.
+pub const GUARD_DATASET_ENABLED_ENV: &str = "APEIRETH_GUARD_DATASET_ENABLED";
+/// Optional JSONL path for the composition-owned Guard dataset recorder.
+pub const GUARD_DATASET_PATH_ENV: &str = "APEIRETH_GUARD_DATASET_PATH";
 
 /// Enables the local filesystem and search tools in the production policy.
 pub const ENABLE_LOCAL_READ_TOOLS_ENV: &str = "APEIRETH_ENABLE_LOCAL_READ_TOOLS";
@@ -60,6 +65,17 @@ pub fn build_production_governance_parts(
     Arc<std::sync::Mutex<PermissionPolicy>>,
     Arc<BehaviorChainGuardHook>,
 ) {
+    build_production_governance_parts_with_dataset(enable_local_read_tools, None)
+}
+
+fn build_production_governance_parts_with_dataset(
+    enable_local_read_tools: bool,
+    dataset: Option<Arc<DatasetRecorder>>,
+) -> (
+    GovernancePipeline,
+    Arc<std::sync::Mutex<PermissionPolicy>>,
+    Arc<BehaviorChainGuardHook>,
+) {
     let mut policy = PermissionPolicy::new();
     policy.grant(Permission::ExecuteTool("tool.repo".to_string()));
     if enable_local_read_tools {
@@ -67,7 +83,11 @@ pub fn build_production_governance_parts(
         policy.grant(Permission::ExecuteTool("tool.search".to_string()));
     }
     let policy = Arc::new(std::sync::Mutex::new(policy));
-    let guard_hook = Arc::new(BehaviorChainGuardHook::new());
+    let mut guard = BehaviorChainGuardHook::new();
+    if let Some(dataset) = dataset {
+        guard = guard.with_dataset_recorder(dataset);
+    }
+    let guard_hook = Arc::new(guard);
 
     let pipeline = GovernancePipeline::new()
         .with(Arc::new(PermissionGovernanceHook::new_shared(
@@ -99,7 +119,26 @@ fn build_production_governance_parts_from_env() -> (
     let enable_local_read_tools = std::env::var(ENABLE_LOCAL_READ_TOOLS_ENV)
         .ok()
         .is_some_and(|value| value.trim() == "1");
-    build_production_governance_parts(enable_local_read_tools)
+    build_production_governance_parts_with_dataset(
+        enable_local_read_tools,
+        production_guard_dataset_recorder(),
+    )
+}
+
+fn production_guard_dataset_recorder() -> Option<Arc<DatasetRecorder>> {
+    let enabled = std::env::var(GUARD_DATASET_ENABLED_ENV)
+        .ok()
+        .is_some_and(|value| value.trim() == "1");
+    if !enabled {
+        return None;
+    }
+    let path = std::env::var(GUARD_DATASET_PATH_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ".apeireth/guard-dataset-v2.jsonl".to_string());
+    let recorder = Arc::new(DatasetRecorder::new(path));
+    recorder.set_enabled(true);
+    Some(recorder)
 }
 
 /// Build the one canonical runtime used by CLI chat and the HTTP gateway.
@@ -203,6 +242,11 @@ async fn build_canonical_runtime_with_parts(
         .build()
         .await
         .map_err(|error| format!("canonical runtime bootstrap failed: {error}"))?;
+    if let Some(recorder) = guard_hook.dataset_recorder() {
+        runtime.set_event_sink(Arc::new(
+            apeireth_runtime_assembly::GuardDatasetObserver::new(recorder),
+        ));
+    }
     Ok((runtime, policy, guard_hook))
 }
 
@@ -242,14 +286,17 @@ async fn build_canonical_runtime_from_env_with_observability(
             enable_local_read_tools,
             default_panel_data_dir(),
         )
-        .with_guard(guard_hook),
+        .with_guard(guard_hook.clone()),
     );
     let services = crate::gateway_panels::gateway_services(panel);
     let observer = Arc::new(apeireth_gateway::RuntimeObservationSink::new(
         services.trace_commands.clone(),
         services.audit_commands.clone(),
     ));
-    runtime.set_event_sink(observer.clone());
+    let sinks: Vec<Arc<dyn apeireth_runtime::canonical::RuntimeEventSink>> = vec![observer.clone()];
+    runtime.set_event_sink(Arc::new(
+        apeireth_runtime::canonical::CompositeRuntimeEventSink::new(sinks),
+    ));
     Ok((runtime, observer))
 }
 

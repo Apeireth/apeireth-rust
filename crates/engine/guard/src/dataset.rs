@@ -4,6 +4,7 @@
 //! Strictly ensures that no raw secrets, credentials, private memory bodies,
 //! or raw chain-of-thought are ever recorded.
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,11 +18,16 @@ use crate::decision::GuardDecision;
 use crate::fast_guard::FastGuardResult;
 use crate::observation::SafetyObservation;
 
-/// A single entry in the `guard-dataset-v1` JSONL file (event-sourced).
+/// A single entry in the event-sourced Guard dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "record_type", rename_all = "snake_case")]
 pub enum GuardDatasetRecord {
     Classification(ClassificationRecord),
+    Approval(ApprovalRecord),
+    Execution(ExecutionRecord),
+    Compensation(CompensationRecord),
+    /// Legacy outcome rows remain readable so an additive upgrade never
+    /// invalidates an existing dataset file.
     Outcome(OutcomeRecord),
 }
 
@@ -29,6 +35,8 @@ pub enum GuardDatasetRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClassificationRecord {
     pub format: String,
+    #[serde(default = "default_feature_schema_version")]
+    pub feature_schema_version: String,
     pub timestamp_ms: i64,
     pub trace_id: String,
     pub session_id: String,
@@ -37,7 +45,48 @@ pub struct ClassificationRecord {
     pub chain_features: serde_json::Value,
     pub fast_guard: serde_json::Value,
     pub chain_guard: Option<serde_json::Value>,
+    #[serde(default)]
+    pub classifier_prediction: Option<serde_json::Value>,
     pub final_decision: String,
+    #[serde(default)]
+    pub weak_label: bool,
+}
+
+fn default_feature_schema_version() -> String {
+    "AgentChainFeatureV1".to_string()
+}
+
+/// Human approval lifecycle event correlated to one concrete action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub format: String,
+    pub timestamp_ms: i64,
+    pub trace_id: String,
+    pub action_id: String,
+    pub tool_call_id: String,
+    pub approval_id: String,
+    pub decision: String,
+}
+
+/// Capability execution lifecycle event correlated to one concrete action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionRecord {
+    pub format: String,
+    pub timestamp_ms: i64,
+    pub trace_id: String,
+    pub action_id: String,
+    pub tool_call_id: String,
+    pub outcome: String,
+}
+
+/// Compensation lifecycle event correlated to one concrete action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompensationRecord {
+    pub format: String,
+    pub timestamp_ms: i64,
+    pub trace_id: String,
+    pub action_id: String,
+    pub outcome: String,
 }
 
 /// Post-execution runtime outcome snapshot (approved/rejected/success/failure).
@@ -56,6 +105,7 @@ pub struct OutcomeRecord {
 /// Complete supervised training sample correlated across classification and outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisedTrainingSample {
+    pub feature_schema_version: String,
     pub trace_id: String,
     pub session_id: String,
     pub action_id: String,
@@ -63,9 +113,12 @@ pub struct SupervisedTrainingSample {
     pub features: serde_json::Value,
     pub fast_guard: serde_json::Value,
     pub chain_guard: Option<serde_json::Value>,
+    pub classifier_prediction: Option<serde_json::Value>,
     pub final_guard_decision: String,
     pub human_approval: Option<String>,
     pub execution_outcome: Option<String>,
+    pub compensation_outcome: Option<String>,
+    pub weak_label: bool,
 }
 
 /// Thread-safe desensitized dataset recorder.
@@ -110,6 +163,7 @@ impl DatasetRecorder {
 
         let record = GuardDatasetRecord::Classification(ClassificationRecord {
             format: "guard-dataset-v1".to_string(),
+            feature_schema_version: default_feature_schema_version(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             trace_id: obs.trace_id.clone(),
             session_id: obs.session_id.clone(),
@@ -128,7 +182,12 @@ impl DatasetRecorder {
                 "evidence": guard_dec.evidence,
                 "stage": guard_dec.stage,
             })),
+            classifier_prediction: guard_dec
+                .classifier_prediction
+                .as_ref()
+                .and_then(|prediction| serde_json::to_value(prediction).ok()),
             final_decision: guard_dec.decision.label().to_string(),
+            weak_label: true,
         });
 
         self.write_line(&record);
@@ -160,6 +219,65 @@ impl DatasetRecorder {
         });
 
         self.write_line(&record);
+    }
+
+    /// Record an explicit approval event. The action identity is mandatory so
+    /// several actions in one trace cannot inherit the wrong approval.
+    pub fn record_approval(
+        &self,
+        trace_id: &str,
+        action_id: &str,
+        tool_call_id: &str,
+        approval_id: &str,
+        decision: &str,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.write_line(&GuardDatasetRecord::Approval(ApprovalRecord {
+            format: "guard-dataset-v2".to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            trace_id: trace_id.to_string(),
+            action_id: action_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            approval_id: approval_id.to_string(),
+            decision: decision.to_string(),
+        }));
+    }
+
+    /// Record an explicit capability completion event.
+    pub fn record_execution(
+        &self,
+        trace_id: &str,
+        action_id: &str,
+        tool_call_id: &str,
+        outcome: &str,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.write_line(&GuardDatasetRecord::Execution(ExecutionRecord {
+            format: "guard-dataset-v2".to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            trace_id: trace_id.to_string(),
+            action_id: action_id.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            outcome: outcome.to_string(),
+        }));
+    }
+
+    /// Record a compensation result without storing the compensating payload.
+    pub fn record_compensation(&self, trace_id: &str, action_id: &str, outcome: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+        self.write_line(&GuardDatasetRecord::Compensation(CompensationRecord {
+            format: "guard-dataset-v2".to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            trace_id: trace_id.to_string(),
+            action_id: action_id.to_string(),
+            outcome: outcome.to_string(),
+        }));
     }
 
     /// Backward-compatible combined record function.
@@ -212,8 +330,10 @@ impl DatasetRecorder {
         };
 
         let mut classifications = Vec::new();
-        let mut outcomes_by_trace: std::collections::HashMap<String, Vec<OutcomeRecord>> =
-            std::collections::HashMap::new();
+        let mut approvals: HashMap<(String, String), String> = HashMap::new();
+        let mut executions: HashMap<(String, String), String> = HashMap::new();
+        let mut compensations: HashMap<(String, String), String> = HashMap::new();
+        let mut legacy_outcomes_by_trace: HashMap<String, Vec<OutcomeRecord>> = HashMap::new();
 
         for line in content.lines() {
             if line.trim().is_empty() {
@@ -222,8 +342,17 @@ impl DatasetRecorder {
             if let Ok(record) = serde_json::from_str::<GuardDatasetRecord>(line) {
                 match record {
                     GuardDatasetRecord::Classification(c) => classifications.push(c),
+                    GuardDatasetRecord::Approval(a) => {
+                        approvals.insert((a.trace_id, a.action_id), a.decision);
+                    }
+                    GuardDatasetRecord::Execution(e) => {
+                        executions.insert((e.trace_id, e.action_id), e.outcome);
+                    }
+                    GuardDatasetRecord::Compensation(c) => {
+                        compensations.insert((c.trace_id, c.action_id), c.outcome);
+                    }
                     GuardDatasetRecord::Outcome(o) => {
-                        outcomes_by_trace
+                        legacy_outcomes_by_trace
                             .entry(o.trace_id.clone())
                             .or_default()
                             .push(o);
@@ -233,32 +362,56 @@ impl DatasetRecorder {
         }
 
         let mut samples = Vec::new();
-        for c in classifications {
-            let mut matched_approval = None;
-            let mut matched_outcome = None;
+        for c in &classifications {
+            let key = (c.trace_id.clone(), c.action_id.clone());
+            let mut matched_approval = approvals.get(&key).cloned();
+            let mut matched_outcome = executions.get(&key).cloned();
+            let matched_compensation = compensations.get(&key).cloned();
 
-            if let Some(trace_outcomes) = outcomes_by_trace.get(&c.trace_id) {
-                for o in trace_outcomes {
-                    if let Some(app) = &o.human_approval {
-                        matched_approval = Some(app.clone());
-                    }
-                    if let Some(out) = &o.execution_outcome {
-                        matched_outcome = Some(out.clone());
+            // Backward compatibility is intentionally narrow: a legacy
+            // trace-only row may be used only when the trace has exactly one
+            // classification. Multiple actions remain incomplete rather than
+            // receiving an ambiguous label.
+            let trace_classification_count = classifications
+                .iter()
+                .filter(|candidate| candidate.trace_id == c.trace_id)
+                .count();
+            if matched_approval.is_none() || matched_outcome.is_none() {
+                if let Some(trace_outcomes) = legacy_outcomes_by_trace.get(&c.trace_id) {
+                    if trace_classification_count == 1 {
+                        for o in trace_outcomes {
+                            if matched_approval.is_none() {
+                                matched_approval = o.human_approval.clone();
+                            }
+                            if matched_outcome.is_none() {
+                                matched_outcome = o.execution_outcome.clone();
+                            }
+                        }
                     }
                 }
             }
+            if trace_classification_count == 1 && matched_outcome.is_none() {
+                matched_outcome = executions
+                    .iter()
+                    .find(|((trace_id, _), _)| trace_id == &c.trace_id)
+                    .map(|(_, outcome)| outcome.clone());
+            }
 
             samples.push(SupervisedTrainingSample {
-                trace_id: c.trace_id,
-                session_id: c.session_id,
-                action_id: c.action_id,
-                capability_id: c.capability_id,
-                features: c.chain_features,
-                fast_guard: c.fast_guard,
-                chain_guard: c.chain_guard,
-                final_guard_decision: c.final_decision,
+                feature_schema_version: c.feature_schema_version.clone(),
+                trace_id: c.trace_id.clone(),
+                session_id: c.session_id.clone(),
+                action_id: c.action_id.clone(),
+                capability_id: c.capability_id.clone(),
+                features: c.chain_features.clone(),
+                fast_guard: c.fast_guard.clone(),
+                chain_guard: c.chain_guard.clone(),
+                classifier_prediction: c.classifier_prediction.clone(),
+                final_guard_decision: c.final_decision.clone(),
                 human_approval: matched_approval,
                 execution_outcome: matched_outcome,
+                compensation_outcome: matched_compensation,
+                weak_label: c.weak_label,
             });
         }
 

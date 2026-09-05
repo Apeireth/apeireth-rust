@@ -11,9 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::chain::{ActionStatus, BehaviorChain};
 use crate::chain_guard::ChainGuard;
+use crate::classifier::{ChainRiskClassifier, NoClassifier};
 use crate::dataset::DatasetRecorder;
 use crate::decision::GuardDecision;
 use crate::fast_guard::FastGuard;
+use crate::features::AgentChainFeatureV1;
+use crate::fusion::DecisionFusion;
 use crate::introspection::{
     GuardDryRunRequest, GuardDryRunResponse, GuardEventDto, GuardStatusDto,
 };
@@ -61,6 +64,7 @@ pub struct BehaviorChainGuardHook {
     session_scopes: Mutex<HashMap<SessionId, String>>,
     session_risk_history: Mutex<HashMap<SessionId, SessionRiskHistory>>,
     dataset_recorder: Option<Arc<DatasetRecorder>>,
+    classifier: Arc<dyn ChainRiskClassifier>,
     recent_events: Mutex<VecDeque<GuardEventDto>>,
     counters: Mutex<GuardCounters>,
 }
@@ -81,6 +85,7 @@ impl BehaviorChainGuardHook {
             session_scopes: Mutex::new(HashMap::new()),
             session_risk_history: Mutex::new(HashMap::new()),
             dataset_recorder: None,
+            classifier: Arc::new(NoClassifier),
             recent_events: Mutex::new(VecDeque::with_capacity(MAX_RECENT_EVENTS)),
             counters: Mutex::new(GuardCounters::default()),
         }
@@ -89,6 +94,20 @@ impl BehaviorChainGuardHook {
     /// Set an optional dataset recorder for offline ML dataset collection.
     pub fn with_dataset_recorder(mut self, recorder: Arc<DatasetRecorder>) -> Self {
         self.dataset_recorder = Some(recorder);
+        self
+    }
+
+    /// Return the composition-owned recorder so a runtime event observer can
+    /// be attached to the same dataset sink without creating a second file
+    /// writer.
+    pub fn dataset_recorder(&self) -> Option<Arc<DatasetRecorder>> {
+        self.dataset_recorder.clone()
+    }
+
+    /// Install an optional local classifier. The default remains unavailable,
+    /// preserving the deterministic Fast/Chain Guard path.
+    pub fn with_classifier(mut self, classifier: Arc<dyn ChainRiskClassifier>) -> Self {
+        self.classifier = classifier;
         self
     }
 
@@ -135,6 +154,8 @@ impl BehaviorChainGuardHook {
             total_denied: counters.total_denied,
             total_approval_required: counters.total_approval_required,
             dataset_recording_enabled: rec_enabled,
+            ml_classifier_available: self.classifier.available(),
+            ml_model_version: self.classifier.model_version(),
         }
     }
 
@@ -189,6 +210,9 @@ impl BehaviorChainGuardHook {
         } else {
             self.chain_guard.evaluate(&temp_chain, &obs, &fast_res)
         };
+        let features = AgentChainFeatureV1::from_chain(&temp_chain);
+        let prediction = self.classifier.classify(&features);
+        let decision = DecisionFusion::fuse(&decision, &fast_res, &prediction, &features);
 
         GuardDryRunResponse {
             decision: decision.decision.label().to_string(),
@@ -234,7 +258,7 @@ impl BehaviorChainGuardHook {
         );
 
         // Add action to behavior chain
-        let action_id = chain.add_action(&obs, request.round);
+        let action_id = chain.add_action_with_id(&obs, request.round, request.action_id);
 
         // Stage A: Fast Guard
         let fast_res = self
@@ -247,6 +271,10 @@ impl BehaviorChainGuardHook {
         } else {
             self.chain_guard.evaluate(chain, &obs, &fast_res)
         };
+        let features = AgentChainFeatureV1::from_chain(chain);
+        let prediction = self.classifier.classify(&features);
+        let guard_decision =
+            DecisionFusion::fuse(&guard_decision, &fast_res, &prediction, &features);
 
         // Update action status in chain
         let status = match &guard_decision.decision {

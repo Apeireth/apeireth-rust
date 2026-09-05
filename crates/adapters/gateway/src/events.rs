@@ -123,6 +123,7 @@ impl RuntimeEventSink for EventBus {
                 approval,
                 capability,
                 tool_name,
+                tool_call_id,
             } => self.publish(GatewayEvent::new(
                 "approval_required",
                 serde_json::json!({
@@ -132,6 +133,7 @@ impl RuntimeEventSink for EventBus {
                     "approval_id": approval,
                     "capability_id": capability,
                     "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
                 }),
             )),
             RuntimeEvent::TurnFailed {

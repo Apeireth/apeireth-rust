@@ -43,6 +43,8 @@ pub enum RuntimeEvent {
         approval: ApprovalId,
         capability: CapabilityId,
         tool_name: String,
+        /// Stable provider tool-call identity for dataset/audit correlation.
+        tool_call_id: String,
     },
     /// A turn failed before it could commit a final response.
     TurnFailed {

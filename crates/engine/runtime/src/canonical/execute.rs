@@ -1887,12 +1887,10 @@ impl Runtime {
         let label = action.label();
         let verdict = self
             .governance
-            .evaluate_verbose(&GovernanceRequest::new(
-                action,
-                *session_id,
-                trace_id,
-                round,
-            ))
+            .evaluate_verbose(
+                &GovernanceRequest::new(action, *session_id, trace_id, round)
+                    .with_action_id(&call.id),
+            )
             .await;
         let hook = verdict.hook;
         let owner = verdict.owner;
@@ -2086,6 +2084,7 @@ impl Runtime {
                     approval: view.approval_id,
                     capability: view.capability_id.clone(),
                     tool_name: view.tool_name.clone(),
+                    tool_call_id: view.tool_call.id.clone(),
                 });
             }
             Err(error) => self.emit_event(RuntimeEvent::TurnFailed {

@@ -16,6 +16,9 @@ pub enum EdgeType {
     Causal,
     DataFlow,
     PermissionDependency,
+    ResourceDependency,
+    Retry,
+    AlternativeExecution,
 }
 
 /// Action node in the behavior chain.
@@ -107,8 +110,24 @@ impl BehaviorChain {
 
     /// Add an action observation to the chain and wire temporal and dataflow edges.
     pub fn add_action(&mut self, obs: &SafetyObservation, round: u32) -> String {
+        self.add_action_with_id(obs, round, None)
+    }
+
+    /// Add an action using an identity supplied by the runtime when one is
+    /// available (for example a provider tool-call id).  The fallback keeps
+    /// the historic deterministic identity for callers that only have a
+    /// governance request.
+    pub fn add_action_with_id(
+        &mut self,
+        obs: &SafetyObservation,
+        round: u32,
+        requested_id: Option<&str>,
+    ) -> String {
         let sequence = self.actions().len() as u32;
-        let action_id = format!("act:{}:{}:{}", obs.request_id, round, sequence);
+        let action_id = requested_id
+            .filter(|id| !id.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("act:{}:{}:{}", obs.request_id, round, sequence));
 
         // Previous action for temporal edge
         let prev_action_id = self.nodes.iter().rev().find_map(|n| match n {
@@ -130,11 +149,27 @@ impl BehaviorChain {
 
         if let Some(prev) = prev_action_id {
             self.edges.push(BehaviorEdge {
-                from: prev,
+                from: prev.clone(),
                 to: action_id.clone(),
                 edge_type: EdgeType::Temporal,
                 label: Some("seq".to_string()),
             });
+            let actions = self.actions();
+            let previous_action = actions.iter().rev().nth(1);
+            if let Some(previous_action) = previous_action {
+                if previous_action.denied || previous_action.status == ActionStatus::Denied {
+                    self.edges.push(BehaviorEdge {
+                        from: prev,
+                        to: action_id.clone(),
+                        edge_type: if previous_action.capability_id == obs.capability_id {
+                            EdgeType::Retry
+                        } else {
+                            EdgeType::AlternativeExecution
+                        },
+                        label: Some("post_denial".to_string()),
+                    });
+                }
+            }
         }
 
         // Add resource nodes & edges
@@ -148,7 +183,7 @@ impl BehaviorChain {
             self.edges.push(BehaviorEdge {
                 from: action_id.clone(),
                 to: res_id,
-                edge_type: EdgeType::Causal,
+                edge_type: EdgeType::ResourceDependency,
                 label: Some("accesses".to_string()),
             });
         }
@@ -331,21 +366,7 @@ impl BehaviorChain {
 
     /// Summarize chain features for ML readiness and data recording.
     pub fn extract_features(&self) -> serde_json::Value {
-        let actions = self.actions();
-        let denied_count = actions.iter().filter(|a| a.denied).count();
-        let ext_count = actions.iter().filter(|a| a.external_effect).count();
-
-        serde_json::json!({
-            "total_nodes": self.nodes.len(),
-            "total_edges": self.edges.len(),
-            "action_count": actions.len(),
-            "denied_count": denied_count,
-            "external_effect_count": ext_count,
-            "has_sensitive_egress": self.has_sensitive_source_to_external_sink(),
-            "has_retry_escalation": self.has_retry_escalation(),
-            "has_privilege_escalation": self.has_privilege_escalation(),
-            "has_destructive_chain": self.has_destructive_chain(),
-            "declared_scope": self.declared_task_scope,
-        })
+        serde_json::to_value(crate::features::AgentChainFeatureV1::from_chain(self))
+            .unwrap_or_else(|_| serde_json::json!({"schema_version": "AgentChainFeatureV1"}))
     }
 }

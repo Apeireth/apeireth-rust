@@ -43,6 +43,7 @@ impl ChainGuard {
                 reasons,
                 evidence: vec!["fast_guard_immediate_violation".to_string()],
                 stage: GuardStage::FastGuard,
+                classifier_prediction: None,
             };
         }
 
@@ -129,6 +130,7 @@ impl ChainGuard {
             reasons,
             evidence,
             stage: GuardStage::ChainGuard,
+            classifier_prediction: None,
         }
     }
 }

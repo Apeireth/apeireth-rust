@@ -4,12 +4,15 @@ use apeireth_core::kernel::Metadata;
 use apeireth_governance::{Decision, GovernanceVerdict};
 use serde::{Deserialize, Serialize};
 
+use crate::classifier::RiskPrediction;
+
 /// The stage that finalized the guard decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardStage {
     FastGuard,
     ChainGuard,
+    DecisionFusion,
 }
 
 /// Structured, machine-readable outcome from the two-stage safety classifier.
@@ -25,6 +28,9 @@ pub struct GuardDecision {
     pub evidence: Vec<String>,
     /// The stage that finalized the decision.
     pub stage: GuardStage,
+    /// Optional local model output used by decision fusion.
+    #[serde(default)]
+    pub classifier_prediction: Option<RiskPrediction>,
 }
 
 impl GuardDecision {
@@ -36,6 +42,7 @@ impl GuardDecision {
             reasons: Vec::new(),
             evidence: Vec::new(),
             stage: GuardStage::FastGuard,
+            classifier_prediction: None,
         }
     }
 
@@ -56,6 +63,7 @@ impl GuardDecision {
             match self.stage {
                 GuardStage::FastGuard => "fast_guard".to_string(),
                 GuardStage::ChainGuard => "chain_guard".to_string(),
+                GuardStage::DecisionFusion => "decision_fusion".to_string(),
             },
         );
         if !self.reasons.is_empty() {
@@ -63,6 +71,23 @@ impl GuardDecision {
         }
         if !self.evidence.is_empty() {
             metadata.insert("guard_evidence".to_string(), self.evidence.join("; "));
+        }
+        if let Some(prediction) = &self.classifier_prediction {
+            metadata.insert(
+                "guard_classifier_available".to_string(),
+                prediction.available.to_string(),
+            );
+            metadata.insert(
+                "guard_classifier_model".to_string(),
+                prediction.model_version.clone(),
+            );
+            metadata.insert(
+                "guard_classifier_class".to_string(),
+                serde_json::to_string(&prediction.class)
+                    .unwrap_or_else(|_| "unavailable".to_string())
+                    .trim_matches('"')
+                    .to_string(),
+            );
         }
 
         GovernanceVerdict {
@@ -81,6 +106,7 @@ impl GuardDecision {
             "reasons": self.reasons,
             "evidence": self.evidence,
             "stage": self.stage,
+            "classifier_prediction": self.classifier_prediction,
         })
     }
 }

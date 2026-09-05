@@ -19,6 +19,10 @@ pub struct GuardStatusDto {
     pub total_denied: u64,
     pub total_approval_required: u64,
     pub dataset_recording_enabled: bool,
+    #[serde(default)]
+    pub ml_classifier_available: bool,
+    #[serde(default)]
+    pub ml_model_version: Option<String>,
 }
 
 /// A recent guard evaluation event suitable for SSE or audit log display in Desktop.
