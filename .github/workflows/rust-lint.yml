@@ -31,12 +31,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # clippy 编译 keyring/dbus/wayland/pipewire 需要系统库
-      - name: "Install system deps (Linux: libdbus + libwayland + libpipewire)"
+      # clippy 编译 keyring/dbus/wayland/pipewire/egl 需要系统库
+      - name: "Install system deps (Linux: libdbus + libwayland + libpipewire + libegl)"
         run: |
-          sudo apt-get update && sudo apt-get install -y libdbus-1-dev libwayland-dev libpipewire-0.3-dev libspa-0.2-dev pkg-config
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev libwayland-dev libpipewire-0.3-dev libspa-0.2-dev libegl1-mesa-dev libgbm-dev pkg-config
           pkg-config --exists libpipewire-0.3
           pkg-config --modversion libpipewire-0.3
+          pkg-config --exists egl
+          pkg-config --modversion egl
 
       - uses: Swatinem/rust-cache@v2
         with:
