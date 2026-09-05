@@ -17,7 +17,7 @@ pub mod observation;
 
 pub use chain::{ActionNode, ActionStatus, BehaviorChain, BehaviorEdge, BehaviorNode, EdgeType};
 pub use chain_guard::ChainGuard;
-pub use dataset::{DatasetRecorder, GuardDatasetEntry};
+pub use dataset::{DatasetRecorder, GuardDatasetRecord};
 pub use decision::{GuardDecision, GuardStage};
 pub use fast_guard::{FastGuard, FastGuardResult};
 pub use hook::BehaviorChainGuardHook;

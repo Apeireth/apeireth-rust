@@ -1255,6 +1255,80 @@ mod tests {
         }
     }
 
+    impl apeireth_memory::MemoryGovernanceStore for FakeMemory {
+        fn get_governed(
+            &self,
+            _episode_id: &str,
+        ) -> Result<Option<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError>
+        {
+            Ok(None)
+        }
+
+        fn update_episode_content(
+            &self,
+            episode_id: &str,
+            _new_content: &str,
+            _updated_by: Option<&str>,
+            _expected_rev: i64,
+        ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError>
+        {
+            Err(apeireth_memory::MemoryGovernanceError::NotFound(
+                episode_id.to_string(),
+            ))
+        }
+
+        fn forget_episode(
+            &self,
+            episode_id: &str,
+            _reason: Option<&str>,
+            _expected_rev: i64,
+        ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError>
+        {
+            Err(apeireth_memory::MemoryGovernanceError::NotFound(
+                episode_id.to_string(),
+            ))
+        }
+
+        fn protect_episode(
+            &self,
+            episode_id: &str,
+            _expected_rev: i64,
+        ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError>
+        {
+            Err(apeireth_memory::MemoryGovernanceError::NotFound(
+                episode_id.to_string(),
+            ))
+        }
+
+        fn unprotect_episode(
+            &self,
+            episode_id: &str,
+            _expected_rev: i64,
+        ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError>
+        {
+            Err(apeireth_memory::MemoryGovernanceError::NotFound(
+                episode_id.to_string(),
+            ))
+        }
+
+        fn governed_recent_episodes(
+            &self,
+            _session_id: &str,
+            _n: usize,
+        ) -> Result<Vec<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError>
+        {
+            Ok(Vec::new())
+        }
+
+        fn governed_query(
+            &self,
+            _q: &apeireth_memory::EpisodeQuery,
+        ) -> Result<Vec<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
     #[derive(Default)]
     struct FakeExperience {
         wikis: Mutex<Vec<WikiEntry>>,
@@ -1704,8 +1778,10 @@ mod tests {
         ));
         let mut config = CognitiveModuleConfig::default();
         config.judge.enabled = false;
+        let mem = Arc::new(FakeMemory::default());
         let backends = CognitiveBackends {
-            memory: Some(Arc::new(FakeMemory::default())),
+            memory: Some(mem.clone()),
+            memory_governance: Some(mem),
             preferences: Some(Arc::new(FakePreferences)),
             self_assessments: Some(Arc::new(FakeAssessments::default())),
             ..CognitiveBackends::default()

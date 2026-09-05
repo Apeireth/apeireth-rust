@@ -353,8 +353,9 @@ async fn build_cognitive_modules_from_env(
         council: council_enabled,
         ..CognitiveModuleConfig::default()
     };
-    let memory: Arc<dyn apeireth_plugin::memory_backend::MemoryBackend> =
-        Arc::new(SqliteBackend::from_arc(Arc::clone(&pool)));
+    let sqlite_backend = Arc::new(SqliteBackend::from_arc(Arc::clone(&pool)));
+    let memory: Arc<dyn apeireth_plugin::memory_backend::MemoryBackend> = sqlite_backend.clone();
+    let memory_governance: Arc<dyn apeireth_memory::MemoryGovernanceStore> = sqlite_backend.clone();
     let wiki: Arc<dyn apeireth_plugin::experience::WikiEntryStore> = experience.clone();
     let graph: Arc<dyn apeireth_plugin::experience::KnowledgeGraphStore> = experience.clone();
     let associations: Arc<dyn apeireth_plugin::experience::AssociationStore> = experience.clone();
@@ -368,6 +369,7 @@ async fn build_cognitive_modules_from_env(
     };
     let backends = CognitiveBackends {
         memory: Some(memory.clone()),
+        memory_governance: Some(memory_governance),
         wiki: Some(wiki),
         graph: Some(graph),
         associations: Some(associations),

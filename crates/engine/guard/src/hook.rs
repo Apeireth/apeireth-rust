@@ -7,6 +7,7 @@ use apeireth_core::kernel::SessionId;
 use apeireth_governance::{Decision, GovernanceHook, GovernanceRequest, GovernanceVerdict};
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::chain::{ActionStatus, BehaviorChain};
 use crate::chain_guard::ChainGuard;
@@ -28,11 +29,37 @@ struct GuardCounters {
     total_approval_required: u64,
 }
 
+/// Summary of turn-level risk evaluation preserved across turns for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnRiskSummary {
+    pub trace_id: String,
+    pub max_risk_score: f64,
+    pub denied: bool,
+    pub timestamp_ms: i64,
+}
+
+/// Bounded risk history across turns for a session (max 10 items).
+#[derive(Debug, Clone, Default)]
+pub struct SessionRiskHistory {
+    pub summaries: VecDeque<TurnRiskSummary>,
+}
+
+impl SessionRiskHistory {
+    pub fn push(&mut self, summary: TurnRiskSummary) {
+        if self.summaries.len() >= 10 {
+            self.summaries.pop_front();
+        }
+        self.summaries.push_back(summary);
+    }
+}
+
 /// Canonical governance hook evaluating agent behavior chains across two stages.
 pub struct BehaviorChainGuardHook {
     fast_guard: FastGuard,
     chain_guard: ChainGuard,
-    chains: Mutex<HashMap<SessionId, BehaviorChain>>,
+    chains: Mutex<HashMap<(SessionId, String), BehaviorChain>>,
+    session_scopes: Mutex<HashMap<SessionId, String>>,
+    session_risk_history: Mutex<HashMap<SessionId, SessionRiskHistory>>,
     dataset_recorder: Option<Arc<DatasetRecorder>>,
     recent_events: Mutex<VecDeque<GuardEventDto>>,
     counters: Mutex<GuardCounters>,
@@ -51,6 +78,8 @@ impl BehaviorChainGuardHook {
             fast_guard: FastGuard::new(),
             chain_guard: ChainGuard::new(),
             chains: Mutex::new(HashMap::new()),
+            session_scopes: Mutex::new(HashMap::new()),
+            session_risk_history: Mutex::new(HashMap::new()),
             dataset_recorder: None,
             recent_events: Mutex::new(VecDeque::with_capacity(MAX_RECENT_EVENTS)),
             counters: Mutex::new(GuardCounters::default()),
@@ -65,11 +94,25 @@ impl BehaviorChainGuardHook {
 
     /// Set the declared task scope for a given session.
     pub fn set_declared_scope(&self, session_id: &SessionId, scope: impl Into<String>) {
-        let mut chains = self.chains.lock();
-        let chain = chains
-            .entry(*session_id)
-            .or_insert_with(|| BehaviorChain::new(session_id.to_string(), "unknown".to_string()));
-        chain.set_declared_scope(scope);
+        let scope_str = scope.into();
+        self.session_scopes.lock().insert(*session_id, scope_str);
+    }
+
+    /// Retrieve a cloned snapshot of a behavior chain for a specific session and trace.
+    pub fn chain_for_trace(&self, session_id: &SessionId, trace_id: &str) -> Option<BehaviorChain> {
+        self.chains
+            .lock()
+            .get(&(*session_id, trace_id.to_string()))
+            .cloned()
+    }
+
+    /// Retrieve bounded risk history for a session.
+    pub fn session_risk_history(&self, session_id: &SessionId) -> Vec<TurnRiskSummary> {
+        self.session_risk_history
+            .lock()
+            .get(session_id)
+            .map(|h| h.summaries.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Retrieve the current status summary for desktop telemetry and gateway queries.
@@ -105,7 +148,9 @@ impl BehaviorChainGuardHook {
     /// Clear memory for a completed session.
     pub fn clear_session(&self, session_id: &SessionId) {
         let mut chains = self.chains.lock();
-        chains.remove(session_id);
+        chains.retain(|(s, _), _| s != session_id);
+        self.session_scopes.lock().remove(session_id);
+        self.session_risk_history.lock().remove(session_id);
     }
 
     /// Dry-run evaluate an action without permanently recording it in the chain.
@@ -158,9 +203,20 @@ impl BehaviorChainGuardHook {
         &self,
         request: &GovernanceRequest<'_>,
     ) -> (GuardDecision, GovernanceVerdict) {
+        let trace_id = request.trace.to_string();
+        let key = (request.session, trace_id.clone());
         let mut chains = self.chains.lock();
-        let chain = chains.entry(request.session).or_insert_with(|| {
-            BehaviorChain::new(request.session.to_string(), request.trace.to_string())
+        if chains.len() >= 256 {
+            if let Some(oldest_key) = chains.keys().next().cloned() {
+                chains.remove(&oldest_key);
+            }
+        }
+        let chain = chains.entry(key).or_insert_with(|| {
+            let mut c = BehaviorChain::new(request.session.to_string(), trace_id.clone());
+            if let Some(scope) = self.session_scopes.lock().get(&request.session) {
+                c.set_declared_scope(scope.clone());
+            }
+            c
         });
 
         // Calculate retry stats and prior actions
@@ -200,6 +256,18 @@ impl BehaviorChainGuardHook {
         };
         chain.update_action_status(&action_id, status);
 
+        // Record turn risk summary for session continuity (without leaking full DAG)
+        {
+            let mut risk_histories = self.session_risk_history.lock();
+            let hist = risk_histories.entry(request.session).or_default();
+            hist.push(TurnRiskSummary {
+                trace_id: request.trace.to_string(),
+                max_risk_score: guard_decision.risk_score,
+                denied: matches!(guard_decision.decision, Decision::Deny { .. }),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            });
+        }
+
         // Update counters
         {
             let mut c = self.counters.lock();
@@ -235,7 +303,7 @@ impl BehaviorChainGuardHook {
 
         // Record dataset record if recorder is configured
         if let Some(recorder) = &self.dataset_recorder {
-            recorder.record(&obs, chain, &fast_res, &guard_decision, None, None);
+            recorder.record_classification(&action_id, &obs, chain, &fast_res, &guard_decision);
         }
 
         let verdict = guard_decision.to_verdict(self.name());

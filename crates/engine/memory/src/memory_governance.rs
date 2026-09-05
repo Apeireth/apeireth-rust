@@ -196,93 +196,350 @@ pub trait MemoryGovernanceStore: Send + Sync {
     ) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError>;
 }
 
+pub(crate) const GOVERNED_COLS: &'static str =
+    "e.id AS id, e.timestamp AS timestamp, e.role AS role, \
+     e.content AS content, e.session_id AS session_id, \
+     g.status AS status, g.protected AS protected, g.content_override AS content_override, \
+     g.revision AS revision, g.updated_at AS updated_at, g.updated_by AS updated_by, \
+     g.forgotten_at AS forgotten_at";
+
+pub(crate) fn read_governed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GovernedEpisode> {
+    let id: String = row.get("id")?;
+    let timestamp: i64 = row.get("timestamp")?;
+    let role: String = row.get("role")?;
+    let orig_content: String = row.get("content")?;
+    let session_id: String = row.get("session_id")?;
+    let override_content: Option<String> = row.get("content_override")?;
+    let status_str: Option<String> = row.get("status")?;
+    let protected: Option<i64> = row.get("protected")?;
+    let revision: Option<i64> = row.get("revision")?;
+    let updated_at: Option<i64> = row.get("updated_at")?;
+    let updated_by: Option<String> = row.get("updated_by")?;
+    let forgotten_at: Option<i64> = row.get("forgotten_at")?;
+    let content = override_content.unwrap_or(orig_content);
+    Ok(GovernedEpisode {
+        episode: Episode {
+            id,
+            timestamp,
+            role,
+            content,
+            session_id,
+        },
+        status: MemoryGovernanceStatus::from_str(status_str.as_deref().unwrap_or("active")),
+        protected: protected.map_or(false, |p| p != 0),
+        content_override: row.get("content_override")?,
+        revision: revision.unwrap_or(0),
+        updated_at,
+        updated_by,
+        forgotten_at,
+    })
+}
+
+pub(crate) fn ensure_governance_on_conn(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+) -> Result<(MemoryGovernanceStatus, bool, i64), MemoryGovernanceError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO episode_governance (episode_id, status, protected, revision) \
+         VALUES (?1, 'active', 0, 0)",
+        params![episode_id],
+    )?;
+    let row: (String, i64, i64) = conn
+        .query_row(
+            "SELECT status, protected, revision FROM episode_governance WHERE episode_id = ?1",
+            params![episode_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    Ok((MemoryGovernanceStatus::from_str(&row.0), row.1 != 0, row.2))
+}
+
+pub(crate) fn fetch_governed_on_conn(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+) -> Result<Option<GovernedEpisode>, MemoryGovernanceError> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT {} FROM episodes e \
+                 LEFT JOIN episode_governance g ON g.episode_id = e.id \
+                 WHERE e.id = ?1",
+                GOVERNED_COLS
+            ),
+            params![episode_id],
+            read_governed_row,
+        )
+        .optional()
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    Ok(row)
+}
+
+pub(crate) fn cas_failure_on_conn(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    expected_rev: i64,
+) -> MemoryGovernanceError {
+    match fetch_governed_on_conn(conn, episode_id) {
+        Ok(Some(g)) => MemoryGovernanceError::Conflict {
+            id: episode_id.to_string(),
+            expected: expected_rev,
+            actual: g.revision,
+        },
+        _ => MemoryGovernanceError::NotFound(episode_id.to_string()),
+    }
+}
+
+pub(crate) fn get_governed_impl(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+) -> Result<Option<GovernedEpisode>, MemoryGovernanceError> {
+    if episode_id.trim().is_empty() {
+        return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
+    }
+    fetch_governed_on_conn(conn, episode_id)
+}
+
+pub(crate) fn update_episode_content_impl(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    new_content: &str,
+    updated_by: Option<&str>,
+    expected_rev: i64,
+) -> Result<GovernedEpisode, MemoryGovernanceError> {
+    if episode_id.trim().is_empty() {
+        return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
+    }
+    if new_content.chars().count() > MAX_CONTENT_LEN {
+        return Err(MemoryGovernanceError::Invalid(format!(
+            "content too long (max {MAX_CONTENT_LEN} chars)"
+        )));
+    }
+    if fetch_governed_on_conn(conn, episode_id)?.is_none() {
+        return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
+    }
+    ensure_governance_on_conn(conn, episode_id)?;
+    let now = now_ms();
+    let updated = conn
+        .execute(
+            "UPDATE episode_governance SET content_override = ?1, revision = revision + 1, \
+             updated_at = ?2, updated_by = ?3 \
+             WHERE episode_id = ?4 AND revision = ?5",
+            params![new_content, now, updated_by, episode_id, expected_rev],
+        )
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    if updated == 0 {
+        return Err(cas_failure_on_conn(conn, episode_id, expected_rev));
+    }
+    fetch_governed_on_conn(conn, episode_id)?
+        .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+}
+
+pub(crate) fn forget_episode_impl(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    reason: Option<&str>,
+    expected_rev: i64,
+) -> Result<GovernedEpisode, MemoryGovernanceError> {
+    if episode_id.trim().is_empty() {
+        return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
+    }
+    if fetch_governed_on_conn(conn, episode_id)?.is_none() {
+        return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
+    }
+    let (status, protected, _rev) = ensure_governance_on_conn(conn, episode_id)?;
+    if protected {
+        return Err(MemoryGovernanceError::Protected(episode_id.to_string()));
+    }
+    if status == MemoryGovernanceStatus::Forgotten {
+        return Err(MemoryGovernanceError::AlreadyForgotten(
+            episode_id.to_string(),
+        ));
+    }
+    let now = now_ms();
+    let updated = conn
+        .execute(
+            "UPDATE episode_governance SET status = 'forgotten', forgotten_at = ?1, reason = ?2, \
+             revision = revision + 1, updated_at = ?1 \
+             WHERE episode_id = ?3 AND revision = ?4 AND protected = 0 AND status = 'active'",
+            params![now, reason, episode_id, expected_rev],
+        )
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    if updated == 0 {
+        return Err(cas_failure_on_conn(conn, episode_id, expected_rev));
+    }
+    fetch_governed_on_conn(conn, episode_id)?
+        .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+}
+
+pub(crate) fn protect_episode_impl(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    expected_rev: i64,
+) -> Result<GovernedEpisode, MemoryGovernanceError> {
+    if episode_id.trim().is_empty() {
+        return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
+    }
+    if fetch_governed_on_conn(conn, episode_id)?.is_none() {
+        return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
+    }
+    ensure_governance_on_conn(conn, episode_id)?;
+    let now = now_ms();
+    let updated = conn
+        .execute(
+            "UPDATE episode_governance SET protected = 1, revision = revision + 1, updated_at = ?1 \
+             WHERE episode_id = ?2 AND revision = ?3",
+            params![now, episode_id, expected_rev],
+        )
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    if updated == 0 {
+        return Err(cas_failure_on_conn(conn, episode_id, expected_rev));
+    }
+    fetch_governed_on_conn(conn, episode_id)?
+        .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+}
+
+pub(crate) fn unprotect_episode_impl(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    expected_rev: i64,
+) -> Result<GovernedEpisode, MemoryGovernanceError> {
+    if episode_id.trim().is_empty() {
+        return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
+    }
+    if fetch_governed_on_conn(conn, episode_id)?.is_none() {
+        return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
+    }
+    ensure_governance_on_conn(conn, episode_id)?;
+    let now = now_ms();
+    let updated = conn
+        .execute(
+            "UPDATE episode_governance SET protected = 0, revision = revision + 1, updated_at = ?1 \
+             WHERE episode_id = ?2 AND revision = ?3",
+            params![now, episode_id, expected_rev],
+        )
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    if updated == 0 {
+        return Err(cas_failure_on_conn(conn, episode_id, expected_rev));
+    }
+    fetch_governed_on_conn(conn, episode_id)?
+        .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+}
+
+pub(crate) fn governed_recent_episodes_impl(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    n: usize,
+) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {} FROM episodes e \
+             LEFT JOIN episode_governance g ON g.episode_id = e.id \
+             WHERE e.session_id = ?1 AND (g.status IS NULL OR g.status = 'active') \
+             ORDER BY e.timestamp DESC, e.id DESC LIMIT ?2",
+            GOVERNED_COLS
+        ))
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![session_id, n as i64], read_governed_row)
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    let mut out: Vec<GovernedEpisode> = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    out.reverse();
+    Ok(out)
+}
+
+pub(crate) fn governed_query_impl(
+    conn: &rusqlite::Connection,
+    q: &crate::EpisodeQuery,
+) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
+    let mut sql = format!(
+        "SELECT {} FROM episodes e \
+         LEFT JOIN episode_governance g ON g.episode_id = e.id \
+         WHERE (g.status IS NULL OR g.status = 'active')",
+        GOVERNED_COLS
+    );
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = &q.session_id {
+        sql.push_str(" AND e.session_id = ?");
+        args.push(Box::new(s.clone()));
+    }
+    if let Some(c) = &q.continuity_id {
+        sql.push_str(" AND e.continuity_id = ?");
+        args.push(Box::new(c.clone()));
+    }
+    if let Some(since) = q.since {
+        sql.push_str(" AND e.timestamp >= ?");
+        args.push(Box::new(since));
+    }
+    if let Some(until) = q.until {
+        sql.push_str(" AND e.timestamp <= ?");
+        args.push(Box::new(until));
+    }
+    if let Some(role) = &q.role {
+        sql.push_str(" AND e.role = ?");
+        args.push(Box::new(role.clone()));
+    }
+    sql.push_str(" ORDER BY e.timestamp ASC, e.id ASC");
+    if let Some(n) = q.limit {
+        sql.push_str(&format!(" LIMIT {}", n));
+    }
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), read_governed_row)
+        .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?);
+    }
+    Ok(out)
+}
+
 impl SqliteMemoryStore {
-    /// 确保 governance 行存在 (INSERT IF NOT EXISTS, 默认 active/unprotected/rev0).
-    /// 返回当前 governance 行的 (status, protected, revision).
-    fn ensure_governance(
+    pub const GOVERNED_COLS: &'static str = GOVERNED_COLS;
+
+    pub fn read_governed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GovernedEpisode> {
+        read_governed_row(row)
+    }
+
+    pub fn ensure_governance(
         &self,
         episode_id: &str,
     ) -> Result<(MemoryGovernanceStatus, bool, i64), MemoryGovernanceError> {
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO episode_governance (episode_id, status, protected, revision) \
-             VALUES (?1, 'active', 0, 0)",
-            params![episode_id],
-        )?;
-        let row: (String, i64, i64) = conn
-            .query_row(
-                "SELECT status, protected, revision FROM episode_governance WHERE episode_id = ?1",
-                params![episode_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        Ok((MemoryGovernanceStatus::from_str(&row.0), row.1 != 0, row.2))
+        ensure_governance_on_conn(&conn, episode_id)
     }
 
-    fn read_governed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GovernedEpisode> {
-        let id: String = row.get("id")?;
-        let timestamp: i64 = row.get("timestamp")?;
-        let role: String = row.get("role")?;
-        let orig_content: String = row.get("content")?;
-        let session_id: String = row.get("session_id")?;
-        let override_content: Option<String> = row.get("content_override")?;
-        let status_str: Option<String> = row.get("status")?;
-        let protected: Option<i64> = row.get("protected")?;
-        let revision: Option<i64> = row.get("revision")?;
-        let updated_at: Option<i64> = row.get("updated_at")?;
-        let updated_by: Option<String> = row.get("updated_by")?;
-        let forgotten_at: Option<i64> = row.get("forgotten_at")?;
-        let content = override_content.unwrap_or(orig_content);
-        Ok(GovernedEpisode {
-            episode: Episode {
-                id,
-                timestamp,
-                role,
-                content,
-                session_id,
-            },
-            status: MemoryGovernanceStatus::from_str(status_str.as_deref().unwrap_or("active")),
-            protected: protected.map_or(false, |p| p != 0),
-            content_override: row.get("content_override")?,
-            revision: revision.unwrap_or(0),
-            updated_at,
-            updated_by,
-            forgotten_at,
-        })
-    }
-
-    /// governed SELECT 列: episodes 原始列 + governance sidecar (LEFT JOIN).
-    const GOVERNED_COLS: &'static str = "e.id AS id, e.timestamp AS timestamp, e.role AS role, \
-         e.content AS content, e.session_id AS session_id, \
-         g.status AS status, g.protected AS protected, g.content_override AS content_override, \
-         g.revision AS revision, g.updated_at AS updated_at, g.updated_by AS updated_by, \
-         g.forgotten_at AS forgotten_at";
-
-    fn fetch_governed(
+    pub fn fetch_governed(
         &self,
         episode_id: &str,
     ) -> Result<Option<GovernedEpisode>, MemoryGovernanceError> {
         let conn = self.conn()?;
-        let row = conn
-            .query_row(
-                &format!(
-                    "SELECT {} FROM episodes e \
-                     LEFT JOIN episode_governance g ON g.episode_id = e.id \
-                     WHERE e.id = ?1",
-                    Self::GOVERNED_COLS
-                ),
-                params![episode_id],
-                Self::read_governed_row,
-            )
-            .optional()
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        Ok(row)
+        fetch_governed_on_conn(&conn, episode_id)
+    }
+
+    pub fn governance_cas_failure(
+        &self,
+        episode_id: &str,
+        expected_rev: i64,
+    ) -> MemoryGovernanceError {
+        let conn = match self.conn() {
+            Ok(c) => c,
+            Err(e) => return MemoryGovernanceError::Invalid(e.to_string()),
+        };
+        cas_failure_on_conn(&conn, episode_id, expected_rev)
     }
 }
 
@@ -291,10 +548,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         &self,
         episode_id: &str,
     ) -> Result<Option<GovernedEpisode>, MemoryGovernanceError> {
-        if episode_id.trim().is_empty() {
-            return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
-        }
-        self.fetch_governed(episode_id)
+        let conn = self.conn()?;
+        get_governed_impl(&conn, episode_id)
     }
 
     fn update_episode_content(
@@ -304,35 +559,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         updated_by: Option<&str>,
         expected_rev: i64,
     ) -> Result<GovernedEpisode, MemoryGovernanceError> {
-        if episode_id.trim().is_empty() {
-            return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
-        }
-        if new_content.chars().count() > MAX_CONTENT_LEN {
-            return Err(MemoryGovernanceError::Invalid(format!(
-                "content too long (max {MAX_CONTENT_LEN} chars)"
-            )));
-        }
-        // episode 必须存在.
-        if self.fetch_governed(episode_id)?.is_none() {
-            return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
-        }
-        self.ensure_governance(episode_id)?;
-        let now = now_ms();
         let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE episode_governance SET content_override = ?1, revision = revision + 1, \
-                 updated_at = ?2, updated_by = ?3 \
-                 WHERE episode_id = ?4 AND revision = ?5",
-                params![new_content, now, updated_by, episode_id, expected_rev],
-            )
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        drop(conn);
-        if updated == 0 {
-            return Err(self.governance_cas_failure(episode_id, expected_rev));
-        }
-        self.fetch_governed(episode_id)?
-            .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+        update_episode_content_impl(&conn, episode_id, new_content, updated_by, expected_rev)
     }
 
     fn forget_episode(
@@ -341,37 +569,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         reason: Option<&str>,
         expected_rev: i64,
     ) -> Result<GovernedEpisode, MemoryGovernanceError> {
-        if episode_id.trim().is_empty() {
-            return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
-        }
-        if self.fetch_governed(episode_id)?.is_none() {
-            return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
-        }
-        let (status, protected, _rev) = self.ensure_governance(episode_id)?;
-        if protected {
-            return Err(MemoryGovernanceError::Protected(episode_id.to_string()));
-        }
-        if status == MemoryGovernanceStatus::Forgotten {
-            return Err(MemoryGovernanceError::AlreadyForgotten(
-                episode_id.to_string(),
-            ));
-        }
-        let now = now_ms();
         let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE episode_governance SET status = 'forgotten', forgotten_at = ?1, reason = ?2, \
-                 revision = revision + 1, updated_at = ?1 \
-                 WHERE episode_id = ?3 AND revision = ?4 AND protected = 0 AND status = 'active'",
-                params![now, reason, episode_id, expected_rev],
-            )
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        drop(conn);
-        if updated == 0 {
-            return Err(self.governance_cas_failure(episode_id, expected_rev));
-        }
-        self.fetch_governed(episode_id)?
-            .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+        forget_episode_impl(&conn, episode_id, reason, expected_rev)
     }
 
     fn protect_episode(
@@ -379,28 +578,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         episode_id: &str,
         expected_rev: i64,
     ) -> Result<GovernedEpisode, MemoryGovernanceError> {
-        if episode_id.trim().is_empty() {
-            return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
-        }
-        if self.fetch_governed(episode_id)?.is_none() {
-            return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
-        }
-        self.ensure_governance(episode_id)?;
-        let now = now_ms();
         let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE episode_governance SET protected = 1, revision = revision + 1, updated_at = ?1 \
-                 WHERE episode_id = ?2 AND revision = ?3",
-                params![now, episode_id, expected_rev],
-            )
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        drop(conn);
-        if updated == 0 {
-            return Err(self.governance_cas_failure(episode_id, expected_rev));
-        }
-        self.fetch_governed(episode_id)?
-            .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+        protect_episode_impl(&conn, episode_id, expected_rev)
     }
 
     fn unprotect_episode(
@@ -408,28 +587,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         episode_id: &str,
         expected_rev: i64,
     ) -> Result<GovernedEpisode, MemoryGovernanceError> {
-        if episode_id.trim().is_empty() {
-            return Err(MemoryGovernanceError::Invalid("episode id is empty".into()));
-        }
-        if self.fetch_governed(episode_id)?.is_none() {
-            return Err(MemoryGovernanceError::NotFound(episode_id.to_string()));
-        }
-        self.ensure_governance(episode_id)?;
-        let now = now_ms();
         let conn = self.conn()?;
-        let updated = conn
-            .execute(
-                "UPDATE episode_governance SET protected = 0, revision = revision + 1, updated_at = ?1 \
-                 WHERE episode_id = ?2 AND revision = ?3",
-                params![now, episode_id, expected_rev],
-            )
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        drop(conn);
-        if updated == 0 {
-            return Err(self.governance_cas_failure(episode_id, expected_rev));
-        }
-        self.fetch_governed(episode_id)?
-            .ok_or(MemoryGovernanceError::NotFound(episode_id.to_string()))
+        unprotect_episode_impl(&conn, episode_id, expected_rev)
     }
 
     fn governed_recent_episodes(
@@ -437,27 +596,8 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         session_id: &str,
         n: usize,
     ) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
-        if n == 0 {
-            return Ok(Vec::new());
-        }
         let conn = self.conn()?;
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT {} FROM episodes e \
-                 LEFT JOIN episode_governance g ON g.episode_id = e.id \
-                 WHERE e.session_id = ?1 AND (g.status IS NULL OR g.status = 'active') \
-                 ORDER BY e.timestamp DESC, e.id DESC LIMIT ?2",
-                Self::GOVERNED_COLS
-            ))
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![session_id, n as i64], Self::read_governed_row)
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        let mut out: Vec<GovernedEpisode> = rows
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        out.reverse();
-        Ok(out)
+        governed_recent_episodes_impl(&conn, session_id, n)
     }
 
     fn governed_query(
@@ -465,62 +605,88 @@ impl MemoryGovernanceStore for SqliteMemoryStore {
         q: &crate::EpisodeQuery,
     ) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
         let conn = self.conn()?;
-        let mut sql = format!(
-            "SELECT {} FROM episodes e \
-             LEFT JOIN episode_governance g ON g.episode_id = e.id \
-             WHERE (g.status IS NULL OR g.status = 'active')",
-            Self::GOVERNED_COLS
-        );
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(s) = &q.session_id {
-            sql.push_str(" AND e.session_id = ?");
-            args.push(Box::new(s.clone()));
-        }
-        if let Some(c) = &q.continuity_id {
-            sql.push_str(" AND e.continuity_id = ?");
-            args.push(Box::new(c.clone()));
-        }
-        if let Some(since) = q.since {
-            sql.push_str(" AND e.timestamp >= ?");
-            args.push(Box::new(since));
-        }
-        if let Some(until) = q.until {
-            sql.push_str(" AND e.timestamp <= ?");
-            args.push(Box::new(until));
-        }
-        if let Some(role) = &q.role {
-            sql.push_str(" AND e.role = ?");
-            args.push(Box::new(role.clone()));
-        }
-        sql.push_str(" ORDER BY e.timestamp ASC, e.id ASC");
-        if let Some(n) = q.limit {
-            sql.push_str(&format!(" LIMIT {}", n));
-        }
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt
-            .query_map(param_refs.as_slice(), Self::read_governed_row)
-            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?);
-        }
-        Ok(out)
+        governed_query_impl(&conn, q)
     }
 }
 
-impl SqliteMemoryStore {
-    fn governance_cas_failure(&self, episode_id: &str, expected_rev: i64) -> MemoryGovernanceError {
-        match self.fetch_governed(episode_id) {
-            Ok(Some(g)) => MemoryGovernanceError::Conflict {
-                id: episode_id.to_string(),
-                expected: expected_rev,
-                actual: g.revision,
-            },
-            _ => MemoryGovernanceError::NotFound(episode_id.to_string()),
-        }
+impl MemoryGovernanceStore for crate::backend::sqlite::SqliteBackend {
+    fn get_governed(
+        &self,
+        episode_id: &str,
+    ) -> Result<Option<GovernedEpisode>, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(get_governed_impl(conn, episode_id)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn update_episode_content(
+        &self,
+        episode_id: &str,
+        new_content: &str,
+        updated_by: Option<&str>,
+        expected_rev: i64,
+    ) -> Result<GovernedEpisode, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| {
+                Ok(update_episode_content_impl(
+                    conn,
+                    episode_id,
+                    new_content,
+                    updated_by,
+                    expected_rev,
+                ))
+            })
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn forget_episode(
+        &self,
+        episode_id: &str,
+        reason: Option<&str>,
+        expected_rev: i64,
+    ) -> Result<GovernedEpisode, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(forget_episode_impl(conn, episode_id, reason, expected_rev)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn protect_episode(
+        &self,
+        episode_id: &str,
+        expected_rev: i64,
+    ) -> Result<GovernedEpisode, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(protect_episode_impl(conn, episode_id, expected_rev)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn unprotect_episode(
+        &self,
+        episode_id: &str,
+        expected_rev: i64,
+    ) -> Result<GovernedEpisode, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(unprotect_episode_impl(conn, episode_id, expected_rev)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn governed_recent_episodes(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(governed_recent_episodes_impl(conn, session_id, n)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
+    }
+
+    fn governed_query(
+        &self,
+        q: &crate::EpisodeQuery,
+    ) -> Result<Vec<GovernedEpisode>, MemoryGovernanceError> {
+        self.pool()
+            .read(|conn| Ok(governed_query_impl(conn, q)))
+            .map_err(|e| MemoryGovernanceError::Invalid(e.to_string()))?
     }
 }
 

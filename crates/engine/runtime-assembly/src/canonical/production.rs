@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use apeireth_core::kernel::Clock;
+use apeireth_memory::{MemoryCoordinator, MemoryGovernanceStore};
 use apeireth_orchestration::Council;
 use apeireth_plugin::experience::{AssociationStore, KnowledgeGraphStore, WikiEntryStore};
 use apeireth_plugin::memory_backend::MemoryBackend;
@@ -104,6 +105,8 @@ pub type CognitiveModuleConfig = ProductionModulesConfig;
 pub struct ProductionBackends {
     /// Episode and history-stream backend.
     pub memory: Option<Arc<dyn MemoryBackend>>,
+    /// Memory governance store (active/forgotten status, protection, overrides).
+    pub memory_governance: Option<Arc<dyn MemoryGovernanceStore>>,
     /// Optional progressive-disclosure wiki store.
     pub wiki: Option<Arc<dyn WikiEntryStore>>,
     /// Optional knowledge graph store.
@@ -196,10 +199,34 @@ impl ProductionModules {
             capabilities.extend(provider.capabilities());
         }
 
+        // Unified Memory 2.0 coordinator wiring
+        let mut shared_coordinator: Option<Arc<MemoryCoordinator>> = None;
+        if config.memory_recall || config.memory_writeback {
+            let memory = required(backends.memory.clone(), "memory", "memory")?;
+            let governance = required(
+                backends.memory_governance.clone(),
+                "memory_governance",
+                "memory_governance",
+            )?;
+            let mut coordinator =
+                MemoryCoordinator::new(Arc::clone(&memory), Arc::clone(&governance));
+            if let Some(pref) = &backends.preferences {
+                coordinator = coordinator.with_preferences(Arc::clone(pref));
+            }
+            if let (Some(graph), Some(associations)) = (&backends.graph, &backends.associations) {
+                coordinator =
+                    coordinator.with_experience(Arc::clone(graph), Arc::clone(associations));
+            }
+            shared_coordinator = Some(Arc::new(coordinator));
+        }
+
         // Register cognitive modules
         if config.memory_recall {
             let memory = required(backends.memory.clone(), "memory_recall", "memory")?;
             let mut module = MemoryRecallModule::new(memory);
+            if let Some(coord) = &shared_coordinator {
+                module = module.with_coordinator(Arc::clone(coord));
+            }
             if let (Some(wiki), Some(graph), Some(associations)) =
                 (&backends.wiki, &backends.graph, &backends.associations)
             {
@@ -277,6 +304,9 @@ impl ProductionModules {
                 required(backends.memory, "memory_writeback", "memory")?,
                 clock,
             );
+            if let Some(coord) = &shared_coordinator {
+                module = module.with_coordinator(Arc::clone(coord));
+            }
             if let (Some(wiki), Some(graph), Some(associations)) =
                 (&backends.wiki, &backends.graph, &backends.associations)
             {

@@ -107,7 +107,8 @@ impl BehaviorChain {
 
     /// Add an action observation to the chain and wire temporal and dataflow edges.
     pub fn add_action(&mut self, obs: &SafetyObservation, round: u32) -> String {
-        let action_id = format!("act_{}", obs.request_id);
+        let sequence = self.actions().len() as u32;
+        let action_id = format!("act:{}:{}:{}", obs.request_id, round, sequence);
 
         // Previous action for temporal edge
         let prev_action_id = self.nodes.iter().rev().find_map(|n| match n {

@@ -114,7 +114,7 @@ impl MemoryCoordinator {
                         id: ep.id.clone(),
                         layer: MemoryLayerKind::Working,
                         content: ep.content.clone(),
-                        timestamp_ms: ep.timestamp,
+                        timestamp_ms: ep.timestamp * 1000,
                         score: 0.0,
                         importance: 0.8,
                         source_ref: Some(format!("working:{}", ep.session_id)),
@@ -150,7 +150,7 @@ impl MemoryCoordinator {
                         id: ep.id.clone(),
                         layer: MemoryLayerKind::Episodic,
                         content,
-                        timestamp_ms: ep.timestamp,
+                        timestamp_ms: ep.timestamp * 1000,
                         score: 0.0,
                         importance,
                         source_ref: Some(format!("episodic:{}", ep.session_id)),
@@ -170,11 +170,16 @@ impl MemoryCoordinator {
                     query.limit as u32,
                 ) {
                     for pref in prefs {
+                        let pref_ts_ms = if pref.created_at < 10_000_000_000 {
+                            pref.created_at * 1000
+                        } else {
+                            pref.created_at
+                        };
                         candidates.push(RecalledMemoryItem {
                             id: format!("pref:{}", pref.id),
                             layer: MemoryLayerKind::Semantic,
                             content: format!("Topic: {}. Preference: {}", pref.topic, pref.stance),
-                            timestamp_ms: pref.created_at,
+                            timestamp_ms: pref_ts_ms,
                             score: 0.0,
                             importance: pref.confidence.clamp(0.1, 1.0),
                             source_ref: Some(format!("preference:{}", pref.id)),
@@ -310,13 +315,15 @@ impl MemoryCoordinator {
     /// Persist turn writeback entry into Working and Episodic layers.
     pub fn writeback(&self, entry: &MemoryWritebackEntry) -> Result<String, MemoryError> {
         let episode_id = format!("ep-{}", uuid::Uuid::new_v4());
-        let timestamp = entry
-            .timestamp_ms
-            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        let timestamp_secs = if let Some(ms) = entry.timestamp_ms {
+            ms / 1000
+        } else {
+            chrono::Utc::now().timestamp()
+        };
 
         let episode = Episode {
             id: episode_id.clone(),
-            timestamp,
+            timestamp: timestamp_secs,
             role: entry.role.clone(),
             content: entry.content.clone(),
             session_id: entry.session_id.clone(),

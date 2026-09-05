@@ -56,6 +56,8 @@ pub use trace::*;
 pub mod causal_world_model;
 #[path = "canonical/cognitive.rs"]
 pub mod cognitive;
+#[path = "canonical/guard_observer.rs"]
+pub mod guard_observer;
 #[path = "canonical/harness_patch.rs"]
 pub mod harness_patch;
 #[path = "canonical/orchestrator.rs"]
@@ -80,6 +82,7 @@ pub use cognitive::{
     COUNCIL_MODULE_ID, DEFERRED_COGNITIVE_SLOTS, JUDGE_MODULE_ID, MEMORY_RECALL_MODULE_ID,
     MEMORY_WRITEBACK_MODULE_ID, PREFERENCE_RECALL_MODULE_ID, SELF_ASSESSMENT_MODULE_ID,
 };
+pub use guard_observer::GuardDatasetObserver;
 pub use organ_llm_bridge::{InvokerLlmFactory, InvokerLlmInstance, INVOKER_LLM_FACTORY_NAME};
 pub use organ_module::{OrganModule, OrganModuleObservation, ORGAN_MODULE_ID};
 pub use preference_learning::{

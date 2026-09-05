@@ -157,6 +157,74 @@ impl apeireth_plugin::memory_backend::MemoryBackend for FakeMemory {
     }
 }
 
+impl apeireth_memory::MemoryGovernanceStore for FakeMemory {
+    fn get_governed(
+        &self,
+        _episode_id: &str,
+    ) -> Result<Option<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError>
+    {
+        Ok(None)
+    }
+
+    fn update_episode_content(
+        &self,
+        episode_id: &str,
+        _new_content: &str,
+        _updated_by: Option<&str>,
+        _expected_rev: i64,
+    ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError> {
+        Err(apeireth_memory::MemoryGovernanceError::NotFound(
+            episode_id.to_string(),
+        ))
+    }
+
+    fn forget_episode(
+        &self,
+        episode_id: &str,
+        _reason: Option<&str>,
+        _expected_rev: i64,
+    ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError> {
+        Err(apeireth_memory::MemoryGovernanceError::NotFound(
+            episode_id.to_string(),
+        ))
+    }
+
+    fn protect_episode(
+        &self,
+        episode_id: &str,
+        _expected_rev: i64,
+    ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError> {
+        Err(apeireth_memory::MemoryGovernanceError::NotFound(
+            episode_id.to_string(),
+        ))
+    }
+
+    fn unprotect_episode(
+        &self,
+        episode_id: &str,
+        _expected_rev: i64,
+    ) -> Result<apeireth_memory::GovernedEpisode, apeireth_memory::MemoryGovernanceError> {
+        Err(apeireth_memory::MemoryGovernanceError::NotFound(
+            episode_id.to_string(),
+        ))
+    }
+
+    fn governed_recent_episodes(
+        &self,
+        _session_id: &str,
+        _n: usize,
+    ) -> Result<Vec<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError> {
+        Ok(Vec::new())
+    }
+
+    fn governed_query(
+        &self,
+        _q: &apeireth_memory::EpisodeQuery,
+    ) -> Result<Vec<apeireth_memory::GovernedEpisode>, apeireth_memory::MemoryGovernanceError> {
+        Ok(Vec::new())
+    }
+}
+
 #[derive(Default)]
 struct FakeAssessments;
 
@@ -327,8 +395,10 @@ async fn learning_runtime(
     governance: Arc<dyn GovernanceHook>,
 ) -> Runtime {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let mem = Arc::new(FakeMemory);
     let backends = CognitiveBackends {
-        memory: Some(Arc::new(FakeMemory)),
+        memory: Some(mem.clone()),
+        memory_governance: Some(mem),
         preferences: Some(store),
         self_assessments: Some(Arc::new(FakeAssessments::default())),
         ..CognitiveBackends::default()
@@ -357,8 +427,10 @@ fn preference_learning_is_absent_by_default() {
         "preference learning must default off"
     );
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let mem = Arc::new(FakeMemory);
     let backends = CognitiveBackends {
-        memory: Some(Arc::new(FakeMemory)),
+        memory: Some(mem.clone()),
+        memory_governance: Some(mem),
         preferences: Some(Arc::new(FakePrefStore::default())),
         self_assessments: Some(Arc::new(FakeAssessments::default())),
         ..CognitiveBackends::default()
@@ -382,8 +454,10 @@ fn preference_learning_is_absent_by_default() {
 #[test]
 fn opt_in_registers_exactly_one_learning_slot() {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let mem = Arc::new(FakeMemory);
     let backends = CognitiveBackends {
-        memory: Some(Arc::new(FakeMemory)),
+        memory: Some(mem.clone()),
+        memory_governance: Some(mem),
         preferences: Some(Arc::new(FakePrefStore::default())),
         self_assessments: Some(Arc::new(FakeAssessments::default())),
         ..CognitiveBackends::default()
@@ -411,8 +485,10 @@ fn enabled_without_preference_store_fails_at_boot() {
         preference_recall: false,
         ..CognitiveModuleConfig::default()
     };
+    let mem = Arc::new(FakeMemory);
     let backends = CognitiveBackends {
-        memory: Some(Arc::new(FakeMemory)),
+        memory: Some(mem.clone()),
+        memory_governance: Some(mem),
         preferences: None,
         ..CognitiveBackends::default()
     };
