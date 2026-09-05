@@ -339,6 +339,8 @@ export interface GuardStatus {
   total_denied: number;
   total_approval_required: number;
   dataset_recording_enabled: boolean;
+  ml_classifier_available?: boolean;
+  ml_model_version?: string | null;
 }
 
 export interface GuardEvent {
@@ -347,7 +349,7 @@ export interface GuardEvent {
   trace_id: string;
   round: number;
   capability_id: string;
-  stage: 'fast_guard' | 'chain_guard';
+  stage: 'fast_guard' | 'chain_guard' | 'decision_fusion';
   decision: string;
   risk_score: number;
   reasons: string[];
@@ -363,7 +365,7 @@ export interface GuardDryRunRequest {
 
 export interface GuardDryRunResponse {
   decision: string;
-  stage: 'fast_guard' | 'chain_guard';
+  stage: 'fast_guard' | 'chain_guard' | 'decision_fusion';
   risk_score: number;
   reasons: string[];
   evidence: string[];

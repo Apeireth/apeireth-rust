@@ -52,6 +52,7 @@
     HealthState,
     RuntimeHealthReport,
     ToolCallDetails,
+    GuardStatus,
   } from './lib/types';
   import {
     checkHealthDetailed,
@@ -65,6 +66,7 @@
     saveConversations,
     listModels,
     fetchCapabilities,
+    fetchGuardStatus,
     subscribeCompanionEvents,
     capabilityAvailable,
     capabilitySupported,
@@ -245,6 +247,7 @@
   let showRuntimeModal = $state(false);
   let showVoiceCall = $state(false);
   let isRefreshingHealth = $state(false);
+  let guardStatus = $state<GuardStatus | null>(null);
 
   async function openVoiceCall() {
     showVoiceCall = true;
@@ -543,6 +546,8 @@
         if (!capabilities || fresh.runtime.version !== prevVersion || fresh.legacy !== capabilities.legacy) {
           capabilities = fresh;
         }
+        const guard = await fetchGuardStatus(config);
+        guardStatus = 'error' in guard ? null : guard;
         if (activeId) {
           const inbox = await fetchCanonicalApprovals(config, activeId).catch(() => []);
           pendingApprovals = inbox.map((item) => ({
@@ -556,6 +561,7 @@
         }
       } else {
         pendingApprovals = [];
+        guardStatus = null;
       }
     } finally {
       isRefreshingHealth = false;
@@ -1296,6 +1302,23 @@
           {:else}
             <p class="wb-empty">尚未完成探测。点「深度诊断」查看详情。</p>
           {/each}
+          <h3 class="sec-title">行为安全</h3>
+          {#if guardStatus}
+            <div class="rowline">
+              <span class="dot-st" class:ok={guardStatus.enabled} class:bad={!guardStatus.enabled}></span>
+              <span class="k">Guard</span>
+              <code>{guardStatus.ml_classifier_available ? (guardStatus.ml_model_version || '模型已启用') : '确定性模式'}</code>
+              <span class="v">评估 {guardStatus.total_evaluations} · 拒绝 {guardStatus.total_denied} · 待审批 {guardStatus.total_approval_required}</span>
+            </div>
+            <div class="rowline">
+              <span class="dot-st" class:ok={guardStatus.dataset_recording_enabled}></span>
+              <span class="k">数据集</span>
+              <code>{guardStatus.dataset_recording_enabled ? 'recording' : 'off'}</code>
+              <span class="v">分类与运行结果按 action_id 关联</span>
+            </div>
+          {:else}
+            <p class="wb-empty">Guard 状态暂不可用。</p>
+          {/if}
         {/if}
       </div>
     </aside>
