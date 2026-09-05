@@ -49,10 +49,13 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # keyring/dbus/wayland 需要系统库 (仅 Linux)
-      - name: "Install system deps (Linux: libdbus + libwayland)"
+      # keyring/dbus/wayland/pipewire 需要系统库 (仅 Linux)
+      - name: "Install system deps (Linux: libdbus + libwayland + libpipewire)"
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libwayland-dev pkg-config
+        run: |
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev libwayland-dev libpipewire-0.3-dev libspa-0.2-dev pkg-config
+          pkg-config --exists libpipewire-0.3
+          pkg-config --modversion libpipewire-0.3
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

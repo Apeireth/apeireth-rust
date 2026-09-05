@@ -87,6 +87,7 @@ $AllowlistPaths = @(
     'crates/foundation/governance/src/input_security.rs',
     'crates/adapters/sdk/src/voice/*',
     'frontend/companion-desktop/src-tauri/src/logging.rs',
+    '.gitleaks.toml',
     # 真凭证存放位置 (per .gitignore, 不入库)
     'apikey-ultra.txt', 'apikey-*.txt',
     '*.git-credentials', 'Users*.git-credentials',
@@ -104,19 +105,30 @@ function Get-GitleaksAllowlist {
     if (-not (Test-Path $Path)) { return $null }
     $content = Get-Content $Path -Raw
     $allowlist = @{ Paths = @(); Regexes = @() }
-    # 简化的 TOML 解析 ([allowlist] section)
-    if ($content -match '\[allowlist\]') {
-        $section = $content -split '\[allowlist\]' | Select-Object -Last 1
-        $section = $section -split '\[|\r?\n\s*\[' | Select-Object -First 1
-        foreach ($line in ($section -split "`r?`n")) {
-            $line = $line.Trim()
-            if ($line -match '^\s*paths\s*=\s*\[(.*)\]\s*$') {
-                $paths = $Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim('"').Trim("'") }
-                $allowlist.Paths += $paths
-            } elseif ($line -match '^\s*regexes\s*=\s*\[(.*)\]\s*$') {
-                $regexes = $Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim('"').Trim("'") }
-                $allowlist.Regexes += $regexes
-            } elseif ($line -match '^\s*#') { continue }
+    $m = [regex]::Match($content, "(?s)\[allowlist\](.*?)(?:(\r?\n\[\w+)|$)")
+    if ($m.Success) {
+        $section = $m.Groups[1].Value
+        $mp = [regex]::Match($section, "(?s)paths\s*=\s*\[(.*?)(?:\r?\n\s*\])")
+        if ($mp.Success) {
+            $rawPaths = $mp.Groups[1].Value -split "\r?\n"
+            foreach ($p in $rawPaths) {
+                $trimmed = $p.Trim().Trim(',').Trim()
+                if ($trimmed -and -not $trimmed.StartsWith('#')) {
+                    $val = $trimmed.Trim('"').Trim("'")
+                    if ($val) { $allowlist.Paths += $val }
+                }
+            }
+        }
+        $mr = [regex]::Match($section, "(?s)regexes\s*=\s*\[(.*?)(?:\r?\n\s*\])")
+        if ($mr.Success) {
+            $rawRegexes = $mr.Groups[1].Value -split "\r?\n"
+            foreach ($r in $rawRegexes) {
+                $trimmed = $r.Trim().Trim(',').Trim()
+                if ($trimmed -and -not $trimmed.StartsWith('#')) {
+                    $val = $trimmed.Trim('"').Trim("'")
+                    if ($val) { $allowlist.Regexes += $val }
+                }
+            }
         }
     }
     return $allowlist
@@ -132,7 +144,11 @@ function Get-GitleaksAllowlist {
 function Test-PathAllowed {
     param([string]$Path, [string[]]$AllowlistPaths)
     foreach ($pattern in $AllowlistPaths) {
+        if (-not $pattern) { continue }
         if ($Path -like $pattern) { return $true }
+        try {
+            if ($Path -match $pattern) { return $true }
+        } catch {}
     }
     return $false
 }
@@ -244,7 +260,10 @@ $filtered = foreach ($f in $findings) {
     if ($allowlist) {
         $skip = $false
         foreach ($rx in $allowlist.Regexes) {
-            if ($f.Match -match $rx) { $skip = $true; break }
+            if (-not $rx) { continue }
+            try {
+                if ($f.Match -match $rx -or $f.Snippet -match $rx) { $skip = $true; break }
+            } catch {}
         }
         if ($skip) { continue }
     }

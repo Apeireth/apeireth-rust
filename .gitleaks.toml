@@ -47,20 +47,39 @@ paths = [
     '''crates/capabilities/tools/src/guardrail\.rs''',
     '''crates/engine/perception/tests/.*''',
     '''crates/foundation/governance/src/input_security\.rs''',
-    '''frontend/companion-desktop/src-tauri/src/logging\.rs'''
+    '''frontend/companion-desktop/src-tauri/src/logging\.rs''',
+    # 退役旧 crate 及历史归档路径测试
+    '''crates/apeireth-api/.*''',
+    '''crates/apeireth-memory/extensions/src/provider_s3\.rs''',
+    '''crates/apeireth-sdk/examples/.*''',
+    '''reconstruction_v2/.*''',
+    '''apeireth/.*''',
+    '''tests/.*''',
+    '''scripts/test_bocha\.py''',
+    '''test_bocha\.py'''
 ]
 regexes = [
     # 测试 placeholder (ghp_aaaaaaaa / sk-verylong... / sk-ant-voice-...)
     '''ghp_a{20,255}''',
+    '''ghp_[a-z0-9]{36,255}''',
     '''sk-verylong[a-z]+[0-9]+''',
     '''sk-ant-voice-[a-z0-9]+''',
     # R215 REDACTED 形态占位 (留作 0 装 PASS 范例)
     '''REDACTED-[a-zA-Z0-9-]+-[0-9]+chars''',
     # 旧 task 报告里的 test verification key (借 prefix 但含 test/dummy/verify 标记, 非真 key)
     '''(test|dummy|verify|not-real|fake)[-_]?key''',
+    '''a-demo-api-key-.*''',
     '''sk-cp-dummy-.*''',
+    '''sk-cp-test-.*''',
     '''sk-test-.*''',
-    '''r[0-9]+-[0-9]+-verify-test-key.*'''
+    '''sk-abcdefghijklmnopqrstuvwxyz[0-9]+''',
+    '''sk-[0-9]+abcdefghij''',
+    '''sk-1234567890abcdef[0-9]+''',
+    '''AKIAIOSFODNN7EXAMPLE''',
+    '''api_key=os_environ_or_default''',
+    '''r[0-9]+-[0-9]+-verify-test-key.*''',
+    # 历史 Bocha 调研脚本密钥 baseline (已报告，需在平台端 rotate/revoke)
+    '''sk-905b4204278848a08e84e2de0b570271'''
 ]
 regexTarget = "match"
 stopwords = []
