@@ -162,6 +162,22 @@ pub const MIGRATIONS: &[Migration] = &[
               );\n\
               CREATE INDEX IF NOT EXISTS idx_research_lineage_events_ts ON research_lineage_events(ts);",
     },
+    // Memory 2.1: additive scope/provenance metadata sidecar. Episodes stay
+    // append-only; existing rows without metadata are interpreted as
+    // session-scoped legacy records by the coordinator.
+    Migration {
+        version: 9,
+        name: "V9__episode_memory_scope_metadata",
+        sql: r#"
+CREATE TABLE IF NOT EXISTS episode_memory_metadata (
+    episode_id TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_episode_memory_metadata_scope
+    ON episode_memory_metadata(json_extract(metadata_json, '$.scope.scope'));
+"#,
+    },
 ];
 
 const HALLWAYS_SQL: &str = r#"
@@ -523,7 +539,7 @@ mod tests {
         // 全新 in-memory DB: V1-V7 全部应用, schema_migrations 记录完整.
         let store = SqliteMemoryStore::open_in_memory().unwrap();
         let applied = store.applied_migrations().unwrap();
-        for v in 1..=7 {
+        for v in 1..=9 {
             assert!(
                 applied.contains(&v),
                 "migration V{v} should be applied on fresh db"
@@ -627,8 +643,8 @@ mod tests {
         let applied = store.applied_migrations().unwrap();
         assert_eq!(
             applied.iter().filter(|v| **v >= 5).count(),
-            4,
-            "V5/V6/V7/V8 各一条"
+            5,
+            "V5/V6/V7/V8/V9 各一条"
         );
     }
 

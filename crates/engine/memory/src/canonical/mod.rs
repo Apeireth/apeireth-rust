@@ -12,6 +12,16 @@ pub mod retrieval;
 pub mod sqlite;
 pub mod vector;
 
+pub use crate::retrieval_pipeline::{
+    BasicLexicalCandidateSource, HybridRetrievalPipeline, LexicalCandidateSource,
+    MemoryCandidateSource, RetrievalStatus, StaticVectorCandidateSource, VectorCandidateSource,
+};
+pub use crate::scope::{
+    DeterministicReranker, EmbeddingError, EmbeddingProvider, InMemoryPersonaProfileStore,
+    MemoryCandidate, MemoryProvenance, MemoryRankingConfig, MemoryReranker, MemoryScope,
+    NoEmbeddingProvider, PersonaMemoryProfile, PersonaProfileDelta, PersonaProfileStore,
+    ScoreComponents,
+};
 pub use domain::{MemoryId, MemoryItem};
 pub use error::MemoryError;
 pub use graph::{Edge, MemoryGraph, Node};
@@ -21,4 +31,6 @@ pub use retrieval::{
     DEFAULT_ACT_R_DECAY, DEFAULT_IMPORTANCE_WEIGHT,
 };
 pub use sqlite::SqliteMemoryRepository;
-pub use vector::{cosine_similarity, VectorHit, VectorIndex};
+pub use vector::{
+    content_hash, cosine_similarity, VectorHit, VectorIndex, VectorMetadataStore, VectorRecord,
+};

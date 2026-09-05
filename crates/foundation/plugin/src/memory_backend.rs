@@ -83,6 +83,28 @@ pub trait MemoryBackend: Send + Sync {
     fn get_episode(&self, id: &str) -> CapabilityResult<Option<Episode>>;
     fn recent_episodes(&self, session_id: &str, n: usize) -> CapabilityResult<Vec<Episode>>;
 
+    /// Persist structured Memory Plane metadata beside an append-only episode.
+    ///
+    /// This optional extension keeps the foundation trait independent of the
+    /// engine's concrete scope types while allowing production backends to
+    /// persist scope/provenance additively. Backends without metadata support
+    /// retain legacy behavior and return no metadata on reads.
+    fn put_episode_metadata(
+        &self,
+        _episode_id: &str,
+        _metadata: serde_json::Value,
+    ) -> CapabilityResult<()> {
+        Ok(())
+    }
+
+    /// Read structured Memory Plane metadata, if the backend supports it.
+    fn get_episode_metadata(
+        &self,
+        _episode_id: &str,
+    ) -> CapabilityResult<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
     /// 追加一条历史流条目 (append-only). `kind` 是 typed enum (6 流).
     /// `entry` 是 typed `HistoryEntry` struct (O-6 锚 #18 兑现, 替代 serde_json::Value 占位).
     fn append_stream(&self, kind: StreamKind, entry: HistoryEntry) -> CapabilityResult<()>;

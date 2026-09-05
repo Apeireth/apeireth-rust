@@ -9,8 +9,85 @@
 
 use std::collections::HashMap;
 
+use apeireth_core::kernel::Timestamp;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
 use super::domain::MemoryId;
 use super::error::MemoryError;
+
+/// Persistent metadata for one embedding. The content hash makes invalidation
+/// explicit and the model/dimension pair prevents incompatible vectors from
+/// sharing an index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorRecord {
+    pub memory_id: MemoryId,
+    pub model_id: String,
+    pub dimension: usize,
+    pub vector: Vec<f32>,
+    pub content_hash: String,
+    pub updated_at: Timestamp,
+}
+
+impl VectorRecord {
+    pub fn new(
+        memory_id: MemoryId,
+        model_id: impl Into<String>,
+        vector: Vec<f32>,
+        content: &str,
+        updated_at: Timestamp,
+    ) -> Result<Self, MemoryError> {
+        let dimension = vector.len();
+        if dimension == 0 || vector.iter().any(|value| !value.is_finite()) {
+            return Err(MemoryError::InvalidData(
+                "embedding vector must be non-empty and finite".into(),
+            ));
+        }
+        Ok(Self {
+            memory_id,
+            model_id: model_id.into(),
+            dimension,
+            vector,
+            content_hash: content_hash(content),
+            updated_at,
+        })
+    }
+
+    pub fn validate_compatible(&self, model_id: &str, dimension: usize) -> Result<(), MemoryError> {
+        if self.model_id != model_id
+            || self.dimension != dimension
+            || self.vector.len() != dimension
+        {
+            return Err(MemoryError::InvalidData(format!(
+                "embedding metadata mismatch: stored model={} dimension={}, requested model={} dimension={}",
+                self.model_id, self.dimension, model_id, dimension
+            )));
+        }
+        if self.vector.iter().any(|value| !value.is_finite()) {
+            return Err(MemoryError::InvalidData(
+                "embedding vector contains a non-finite value".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// SHA-256 content identity used to invalidate stale vectors.
+pub fn content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Persistence contract for embedding metadata. The repository implementation
+/// is additive; a missing row simply means lazy embedding is required.
+#[async_trait]
+pub trait VectorMetadataStore: Send + Sync {
+    async fn get_vector(&self, memory_id: &MemoryId) -> Result<Option<VectorRecord>, MemoryError>;
+    async fn upsert_vector(&self, record: VectorRecord) -> Result<(), MemoryError>;
+    async fn remove_vector(&self, memory_id: &MemoryId) -> Result<(), MemoryError>;
+}
 
 /// A query hit: memory id plus cosine similarity score.
 #[derive(Debug, Clone, PartialEq)]

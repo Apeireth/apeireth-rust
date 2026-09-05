@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{MemoryProvenance, MemoryScope};
+
 /// The four canonical memory layers in Apeireth Unified Memory 2.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,12 +58,21 @@ pub struct MemoryRecallQuery {
     pub max_chars: usize,
     pub recency_decay_lambda: f64,
     pub min_score: f64,
+    /// Optional deterministic time probe. When absent, production uses the
+    /// current clock for backward compatibility; tests should set it.
+    #[serde(default)]
+    pub as_of_ms: Option<i64>,
+    /// Explicit closed-world visibility set. Legacy queries default to their
+    /// own session plus Global and therefore cannot see another session.
+    #[serde(default)]
+    pub visible_scopes: Vec<MemoryScope>,
 }
 
 impl MemoryRecallQuery {
     pub fn new(session_id: impl Into<String>, query_text: impl Into<String>) -> Self {
+        let session_id = session_id.into();
         Self {
-            session_id: session_id.into(),
+            session_id: session_id.clone(),
             query_text: query_text.into(),
             layers: vec![
                 MemoryLayerKind::Working,
@@ -73,6 +84,13 @@ impl MemoryRecallQuery {
             max_chars: 4000,
             recency_decay_lambda: 0.05,
             min_score: 0.10,
+            as_of_ms: None,
+            visible_scopes: vec![
+                MemoryScope::Global,
+                MemoryScope::Session {
+                    session_id: session_id.clone(),
+                },
+            ],
         }
     }
 
@@ -91,6 +109,29 @@ impl MemoryRecallQuery {
     #[must_use]
     pub fn with_layers(mut self, layers: Vec<MemoryLayerKind>) -> Self {
         self.layers = layers;
+        self
+    }
+
+    /// Replace the explicit visibility set used by the scope filter.
+    #[must_use]
+    pub fn with_visible_scopes(mut self, visible_scopes: Vec<MemoryScope>) -> Self {
+        self.visible_scopes = visible_scopes;
+        self
+    }
+
+    /// Add one visible scope while preserving deterministic insertion order.
+    #[must_use]
+    pub fn with_visible_scope(mut self, scope: MemoryScope) -> Self {
+        if !self.visible_scopes.contains(&scope) {
+            self.visible_scopes.push(scope);
+        }
+        self
+    }
+
+    /// Set the deterministic retrieval time probe.
+    #[must_use]
+    pub fn with_as_of_ms(mut self, as_of_ms: i64) -> Self {
+        self.as_of_ms = Some(as_of_ms);
         self
     }
 }
@@ -113,6 +154,12 @@ pub struct MemoryWritebackEntry {
     pub importance: Option<f64>,
     pub timestamp_ms: Option<i64>,
     pub tags: Vec<String>,
+    /// Scope assigned before persistence; defaults to the source session.
+    #[serde(default)]
+    pub scope: MemoryScope,
+    /// Structured, non-secret provenance for the write.
+    #[serde(default)]
+    pub provenance: MemoryProvenance,
 }
 
 impl MemoryWritebackEntry {
@@ -121,13 +168,21 @@ impl MemoryWritebackEntry {
         role: impl Into<String>,
         content: impl Into<String>,
     ) -> Self {
+        let session_id = session_id.into();
         Self {
-            session_id: session_id.into(),
+            session_id: session_id.clone(),
             role: role.into(),
             content: content.into(),
             importance: None,
             timestamp_ms: None,
             tags: Vec::new(),
+            scope: MemoryScope::Session {
+                session_id: session_id.clone(),
+            },
+            provenance: MemoryProvenance {
+                source_session: Some(session_id),
+                ..MemoryProvenance::default()
+            },
         }
     }
 }

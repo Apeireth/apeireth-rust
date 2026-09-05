@@ -291,17 +291,36 @@ pub use three_layer::{ThreeLayerMemory, SHORT_TERM_WINDOW_SECS, WORKING_CAPACITY
 // Unified Memory 2.0 (coordinator, 4-layer architecture, closed-world prompt injection)
 pub mod consolidation;
 pub mod context_compiler;
+pub mod context_window;
 pub mod continuity_state;
 pub mod coordinator;
+pub mod extraction;
 pub mod layers;
+pub mod retrieval_pipeline;
+pub mod scope;
 
-pub use consolidation::{ConsolidationReport, MemoryConsolidationJob};
+pub use consolidation::{ConsolidationReport, MemoryConsolidationJob, MemoryConsolidationOutput};
 pub use context_compiler::ClosedWorldContextCompiler;
+pub use context_window::{ContextWindow, ContextWindowManager, ContextWindowPolicy};
 pub use continuity_state::{ContinuityCompressor, ContinuityState};
 pub use coordinator::MemoryCoordinator;
+pub use extraction::{
+    ExtractedMemory, ExtractionClass, MemoryExtractionInput, MemoryExtractionMessage,
+    MemoryExtractionResult, MemoryExtractor, RuleMemoryExtractor,
+};
 pub use layers::{
     MemoryLayerKind, MemoryRecallQuery, MemoryRecallResult, MemoryWritebackEntry,
     RecalledMemoryItem,
+};
+pub use retrieval_pipeline::{
+    unicode_tokens, BasicLexicalCandidateSource, HybridRetrievalPipeline, LexicalCandidateSource,
+    MemoryCandidateSource, RetrievalStatus, StaticVectorCandidateSource, VectorCandidateSource,
+};
+pub use scope::{
+    DeterministicReranker, EmbeddingError, EmbeddingProvider, InMemoryPersonaProfileStore,
+    MemoryCandidate, MemoryProvenance, MemoryRankingConfig, MemoryReranker, MemoryScope,
+    NoEmbeddingProvider, PersonaMemoryProfile, PersonaProfileDelta, PersonaProfileStore,
+    ScoreComponents,
 };
 
 /// 重新导出 `apeireth_core::kernel::memory::Episode` 方便下游不必记多个导入路径.

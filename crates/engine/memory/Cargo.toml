@@ -10,6 +10,7 @@ description = "Apeireth canonical memory: durable storage, ACT-R retrieval, grap
 [dependencies]
 apeireth-core = { path = "../../foundation/core" }
 apeireth-plugin = { path = "../../foundation/plugin" }
+apeireth-protocol = { path = "../../foundation/protocol" }
 apeireth-storage = { path = "../storage" }
 async-trait = { workspace = true }
 tokio = { workspace = true }

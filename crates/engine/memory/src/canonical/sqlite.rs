@@ -14,6 +14,7 @@ use rusqlite::{params, OptionalExtension, Row};
 use super::domain::{MemoryId, MemoryItem};
 use super::error::MemoryError;
 use super::repository::{MemoryFilter, MemoryRepository};
+use super::vector::{VectorMetadataStore, VectorRecord};
 
 const SELECT_COLUMNS: &str = "id, data, importance, access_count, access_times, \
      created_at, valid_from, valid_until, is_tombstone, artifact_sig";
@@ -345,5 +346,102 @@ impl MemoryRepository for SqliteMemoryRepository {
                 Ok(())
             }
         }
+    }
+}
+
+#[async_trait]
+impl VectorMetadataStore for SqliteMemoryRepository {
+    async fn get_vector(&self, memory_id: &MemoryId) -> Result<Option<VectorRecord>, MemoryError> {
+        let id = memory_id.as_str().to_string();
+        let row = self.pool.read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT memory_id, model_id, dimension, vector_json, content_hash, updated_at \
+                         FROM memory_vectors WHERE memory_id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .optional()?)
+        })?;
+        let Some((id, model_id, dimension, vector_json, content_hash, updated_at)) = row else {
+            return Ok(None);
+        };
+        let memory_id = MemoryId::new(id).map_err(|error| error)?;
+        let vector = serde_json::from_str(&vector_json).map_err(|error| {
+            MemoryError::InvalidData(format!("invalid persisted vector: {error}"))
+        })?;
+        let dimension = usize::try_from(dimension).map_err(|_| {
+            MemoryError::InvalidData("persisted vector dimension is negative".into())
+        })?;
+        let updated_at = Timestamp::from_epoch_millis(updated_at).ok_or_else(|| {
+            MemoryError::InvalidData("persisted vector timestamp out of range".into())
+        })?;
+        Ok(Some(VectorRecord {
+            memory_id,
+            model_id,
+            dimension,
+            vector,
+            content_hash,
+            updated_at,
+        }))
+    }
+
+    async fn upsert_vector(&self, record: VectorRecord) -> Result<(), MemoryError> {
+        record.validate_compatible(&record.model_id, record.dimension)?;
+        let vector_json = serde_json::to_string(&record.vector).map_err(|error| {
+            MemoryError::InvalidData(format!("invalid vector payload: {error}"))
+        })?;
+        let memory_id = record.memory_id.to_string();
+        let model_id = record.model_id;
+        let dimension = i64::try_from(record.dimension)
+            .map_err(|_| MemoryError::InvalidData("vector dimension does not fit i64".into()))?;
+        let content_hash = record.content_hash;
+        let updated_at = record.updated_at.epoch_millis();
+        self.pool
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO memory_vectors \
+                     (memory_id, model_id, dimension, vector_json, content_hash, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT(memory_id) DO UPDATE SET \
+                     model_id=excluded.model_id, dimension=excluded.dimension, \
+                     vector_json=excluded.vector_json, content_hash=excluded.content_hash, \
+                     updated_at=excluded.updated_at",
+                    params![
+                        memory_id,
+                        model_id,
+                        dimension,
+                        vector_json,
+                        content_hash,
+                        updated_at
+                    ],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_vector(&self, memory_id: &MemoryId) -> Result<(), MemoryError> {
+        let id = memory_id.as_str().to_string();
+        self.pool
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM memory_vectors WHERE memory_id = ?1",
+                    params![id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(())
     }
 }

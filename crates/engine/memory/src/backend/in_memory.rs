@@ -19,6 +19,7 @@ use super::{BackendKind, MemoryBackend};
 /// 进程内 HashMap 后端（测试用）。
 pub struct InMemoryBackend {
     episodes_by_id: Mutex<HashMap<String, Episode>>,
+    metadata_by_episode: Mutex<HashMap<String, serde_json::Value>>,
     /// `(stream_kind, session_id) -> ordered list of entries`
     streams: Mutex<HashMap<(StreamKind, String), Vec<HistoryEntry>>>,
 }
@@ -27,6 +28,7 @@ impl InMemoryBackend {
     pub fn new() -> Self {
         Self {
             episodes_by_id: Mutex::new(HashMap::new()),
+            metadata_by_episode: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
         }
     }
@@ -93,6 +95,30 @@ impl MemoryBackend for InMemoryBackend {
             all.drain(..skip);
         }
         Ok(all)
+    }
+
+    fn put_episode_metadata(
+        &self,
+        episode_id: &str,
+        metadata: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.metadata_by_episode
+            .lock()
+            .expect("InMemoryBackend poisoned")
+            .insert(episode_id.to_string(), metadata);
+        Ok(())
+    }
+
+    fn get_episode_metadata(
+        &self,
+        episode_id: &str,
+    ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self
+            .metadata_by_episode
+            .lock()
+            .expect("InMemoryBackend poisoned")
+            .get(episode_id)
+            .cloned())
     }
 
     fn append_stream(

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use apeireth_core::kernel::memory::Episode;
 
 /// Bounded continuity representation of a session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContinuityState {
     pub session_id: String,
     pub summary: String,
@@ -15,6 +15,24 @@ pub struct ContinuityState {
     pub active_constraints: Vec<String>,
     pub turn_count: usize,
     pub estimated_tokens: usize,
+    /// Named fields used by ContextWindowManager; `summary` remains the
+    /// compatibility alias for older projections.
+    #[serde(default)]
+    pub rolling_summary: String,
+    #[serde(default)]
+    pub active_goals: Vec<String>,
+    #[serde(default)]
+    pub unresolved_threads: Vec<String>,
+    #[serde(default)]
+    pub identity_anchors: Vec<String>,
+    #[serde(default)]
+    pub preference_deltas: Vec<String>,
+    #[serde(default)]
+    pub recent_entities: Vec<String>,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub updated_at: Option<apeireth_core::kernel::Timestamp>,
 }
 
 /// Deterministic compressor for bounding continuity state without expensive LLM side-calls.
@@ -100,11 +118,21 @@ impl ContinuityCompressor {
 
         ContinuityState {
             session_id: session_id.to_string(),
-            summary,
-            key_entities,
-            active_constraints,
+            summary: summary.clone(),
+            key_entities: key_entities.clone(),
+            active_constraints: active_constraints.clone(),
             turn_count: episodes.len(),
             estimated_tokens,
+            rolling_summary: summary.clone(),
+            active_goals: Vec::new(),
+            unresolved_threads: Vec::new(),
+            identity_anchors: Vec::new(),
+            preference_deltas: active_constraints.clone(),
+            recent_entities: key_entities.clone(),
+            revision: 1,
+            updated_at: episodes.last().and_then(|episode| {
+                apeireth_core::kernel::Timestamp::from_epoch_millis(episode.timestamp * 1000)
+            }),
         }
     }
 }

@@ -186,6 +186,61 @@ impl MemoryBackend for SqliteBackend {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
     }
 
+    fn put_episode_metadata(
+        &self,
+        episode_id: &str,
+        metadata: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let episode_id = episode_id.to_string();
+        let metadata = serde_json::to_string(&metadata)?;
+        self.pool
+            .read(move |conn| {
+                // Keep this self-healing for older test/embedded schemas that
+                // predate V9; the production migration creates the same table.
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS episode_memory_metadata (\
+                     episode_id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL)",
+                )?;
+                conn.execute(
+                    "INSERT INTO episode_memory_metadata (episode_id, metadata_json)\
+                     VALUES (?1, ?2) ON CONFLICT(episode_id) DO UPDATE SET metadata_json = excluded.metadata_json",
+                    rusqlite::params![episode_id, metadata],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    }
+
+    fn get_episode_metadata(
+        &self,
+        episode_id: &str,
+    ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let episode_id = episode_id.to_string();
+        let raw = self
+            .pool
+            .read(move |conn| {
+                let result = conn.query_row(
+                    "SELECT metadata_json FROM episode_memory_metadata WHERE episode_id = ?1",
+                    rusqlite::params![episode_id],
+                    |row| row.get::<_, String>(0),
+                );
+                match result {
+                    Ok(raw) => Ok(Some(raw)),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                    Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                        if message.contains("no such table") =>
+                    {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+        raw.map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
     fn append_stream(
         &self,
         kind: apeireth_core::kernel::StreamKind,

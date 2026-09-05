@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use apeireth_core::kernel::memory::Episode;
 
+use crate::memory_governance::{MemoryGovernanceStatus, MemoryGovernanceStore};
+use crate::MemoryError;
+
 /// Report summarizing memory consolidation execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConsolidationReport {
@@ -15,6 +18,17 @@ pub struct ConsolidationReport {
     pub user_requests: usize,
     pub tool_invocations: usize,
     pub extracted_insights: Vec<String>,
+}
+
+/// Governed consolidation result. Forgotten source episodes are excluded
+/// before deduplication, so derived output cannot resurrect them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryConsolidationOutput {
+    pub merged: Vec<String>,
+    pub promoted: Vec<String>,
+    pub discarded: Vec<String>,
+    pub profile_updates: Vec<String>,
+    pub relation_updates: Vec<String>,
 }
 
 /// Offline or background consolidation job.
@@ -68,5 +82,38 @@ impl MemoryConsolidationJob {
             tool_invocations,
             extracted_insights,
         }
+    }
+
+    /// Consolidate only governance-visible episodes. This is the production
+    /// entry point for a deferred job; it performs no model call.
+    pub fn consolidate_governed(
+        &self,
+        session_id: &str,
+        episodes: &[Episode],
+        governance: &dyn MemoryGovernanceStore,
+    ) -> Result<MemoryConsolidationOutput, MemoryError> {
+        let mut output = MemoryConsolidationOutput::default();
+        let mut seen = std::collections::HashSet::new();
+        for episode in episodes {
+            if let Some(state) = governance
+                .get_governed(&episode.id)
+                .map_err(|error| MemoryError::Invalid(error.to_string()))?
+            {
+                if state.status == MemoryGovernanceStatus::Forgotten {
+                    output.discarded.push(episode.id.clone());
+                    continue;
+                }
+            }
+            let normalized = episode.content.trim().to_lowercase();
+            if !seen.insert(normalized) {
+                output.merged.push(episode.id.clone());
+                continue;
+            }
+            if episode.role == "user" {
+                output.promoted.push(episode.id.clone());
+            }
+        }
+        let _ = session_id;
+        Ok(output)
     }
 }

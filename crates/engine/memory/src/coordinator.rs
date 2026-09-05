@@ -28,6 +28,7 @@ use crate::memory_governance::{
     GovernedEpisode, MemoryGovernanceError, MemoryGovernanceStatus, MemoryGovernanceStore,
 };
 use crate::MemoryError;
+use crate::{MemoryProvenance, MemoryRankingConfig, MemoryScope, ScoreComponents};
 
 const WORKING_RING_BUFFER_CAP: usize = 30;
 
@@ -42,6 +43,7 @@ pub struct MemoryCoordinator {
     compressor: ContinuityCompressor,
     compiler: ClosedWorldContextCompiler,
     consolidation: MemoryConsolidationJob,
+    ranking: MemoryRankingConfig,
 }
 
 impl MemoryCoordinator {
@@ -60,6 +62,7 @@ impl MemoryCoordinator {
             compressor: ContinuityCompressor::new(),
             compiler: ClosedWorldContextCompiler::new(),
             consolidation: MemoryConsolidationJob::new(),
+            ranking: MemoryRankingConfig::default(),
         }
     }
 
@@ -92,9 +95,18 @@ impl MemoryCoordinator {
         self.backend.as_ref()
     }
 
+    /// Configure the centralized deterministic ranking weights.
+    #[must_use]
+    pub fn with_ranking_config(mut self, ranking: MemoryRankingConfig) -> Self {
+        self.ranking = ranking;
+        self
+    }
+
     /// Execute the Unified Recall Pipeline across requested layers.
     pub fn recall(&self, query: &MemoryRecallQuery) -> Result<MemoryRecallResult, MemoryError> {
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = query
+            .as_of_ms
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
         let mut candidates = Vec::new();
         let mut governance_filtered = 0;
 
@@ -109,6 +121,11 @@ impl MemoryCoordinator {
                             governance_filtered += 1;
                             continue;
                         }
+                    }
+                    let (scope, _provenance) = self.episode_scope_metadata(ep);
+                    if !scope.is_visible_in(&query.visible_scopes) {
+                        governance_filtered += 1;
+                        continue;
                     }
                     candidates.push(RecalledMemoryItem {
                         id: ep.id.clone(),
@@ -132,6 +149,12 @@ impl MemoryCoordinator {
                 for ep in raw_eps {
                     let mut content = ep.content.clone();
                     let mut importance = 0.5;
+
+                    let (scope, _provenance) = self.episode_scope_metadata(&ep);
+                    if !scope.is_visible_in(&query.visible_scopes) {
+                        governance_filtered += 1;
+                        continue;
+                    }
 
                     if let Ok(Some(gov)) = self.governance.get_governed(&ep.id) {
                         if gov.status == MemoryGovernanceStatus::Forgotten {
@@ -219,27 +242,21 @@ impl MemoryCoordinator {
         let total_candidates = candidates.len();
 
         // 2. Multi-factor Ranking
-        let query_tokens: Vec<String> = query
-            .query_text
-            .to_lowercase()
-            .split_whitespace()
-            .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-            .filter(|s| s.len() > 1)
-            .collect();
+        let query_tokens = unicode_tokens(&query.query_text);
 
         for item in &mut candidates {
             // Keyword match ratio
-            let item_lower = item.content.to_lowercase();
+            let item_tokens = unicode_tokens(&item.content);
             let matched_tokens = if query_tokens.is_empty() {
-                1.0
+                0.0
             } else {
                 let matches = query_tokens
                     .iter()
-                    .filter(|token| item_lower.contains(token.as_str()))
+                    .filter(|token| item_tokens.iter().any(|candidate| candidate == *token))
                     .count();
                 matches as f64 / query_tokens.len() as f64
             };
-            let s_rel = matched_tokens.clamp(0.1, 1.0);
+            let s_rel = matched_tokens.clamp(0.0, 1.0);
 
             // Recency decay: S_rec = exp(-lambda * delta_hours)
             let delta_hours = (now_ms - item.timestamp_ms).max(0) as f64 / (1000.0 * 3600.0);
@@ -251,14 +268,16 @@ impl MemoryCoordinator {
             let s_imp = item.importance.clamp(0.1, 1.0);
 
             // Preference boost
-            let s_pref = if item.layer == MemoryLayerKind::Semantic {
-                1.0
-            } else {
-                0.0
+            let components = ScoreComponents {
+                semantic: 0.0,
+                lexical: s_rel,
+                importance: s_imp,
+                recency: s_rec,
+                activation: 0.0,
+                continuity: 0.0,
+                confidence: s_imp,
             };
-
-            // Combined weighted score
-            item.score = 0.35 * s_rel + 0.35 * s_rec + 0.15 * s_imp + 0.15 * s_pref;
+            item.score = components.weighted(&self.ranking);
         }
 
         // 3. Diversity & Dedup
@@ -346,6 +365,17 @@ impl MemoryCoordinator {
             .put_episode(&episode)
             .map_err(|e| MemoryError::Invalid(e.to_string()))?;
 
+        self.backend
+            .put_episode_metadata(
+                &episode_id,
+                serde_json::json!({
+                    "scope": entry.scope,
+                    "provenance": entry.provenance,
+                    "layer": "episodic"
+                }),
+            )
+            .map_err(|e| MemoryError::Invalid(e.to_string()))?;
+
         Ok(episode_id)
     }
 
@@ -424,4 +454,63 @@ impl MemoryCoordinator {
         self.governance
             .update_episode_content(episode_id, new_content, updated_by, expected_rev)
     }
+
+    fn episode_scope_metadata(&self, episode: &Episode) -> (MemoryScope, MemoryProvenance) {
+        let fallback_scope = MemoryScope::Session {
+            session_id: episode.session_id.clone(),
+        };
+        let fallback_provenance = MemoryProvenance {
+            source_session: Some(episode.session_id.clone()),
+            ..MemoryProvenance::default()
+        };
+        let Ok(Some(metadata)) = self.backend.get_episode_metadata(&episode.id) else {
+            return (fallback_scope, fallback_provenance);
+        };
+        let scope = metadata
+            .get("scope")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or(fallback_scope);
+        let provenance = metadata
+            .get("provenance")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or(fallback_provenance);
+        (scope, provenance)
+    }
+}
+
+/// Basic Unicode-aware segmentation used by the coordinator's lexical stage.
+/// ASCII whitespace alone would make Chinese recall silently fail; CJK
+/// characters are emitted as single-character fallback tokens.
+fn unicode_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut latin = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            if is_cjk(ch) {
+                if !latin.is_empty() {
+                    tokens.push(latin.to_lowercase());
+                    latin.clear();
+                }
+                tokens.push(ch.to_string());
+            } else {
+                latin.push(ch);
+            }
+        } else if !latin.is_empty() {
+            tokens.push(latin.to_lowercase());
+            latin.clear();
+        }
+    }
+    if !latin.is_empty() {
+        tokens.push(latin.to_lowercase());
+    }
+    tokens
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+    )
 }

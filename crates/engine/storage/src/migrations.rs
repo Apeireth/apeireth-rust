@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use crate::StorageError;
 
 /// The latest schema version this storage foundation knows about.
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+pub const LATEST_SCHEMA_VERSION: i64 = 3;
 
 /// One schema migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,22 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_created_at ON memory_items(created_a
 CREATE INDEX IF NOT EXISTS idx_memory_items_valid_from ON memory_items(valid_from);
 CREATE INDEX IF NOT EXISTS idx_memory_items_valid_until ON memory_items(valid_until);
 CREATE INDEX IF NOT EXISTS idx_memory_items_tombstone ON memory_items(is_tombstone);
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "canonical_vector_metadata",
+        sql: r#"
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    memory_id TEXT PRIMARY KEY,
+    model_id TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    vector_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_vectors_model_dimension
+    ON memory_vectors(model_id, dimension);
 "#,
     },
 ];
@@ -146,13 +162,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_database_migrates_through_v1_and_v2() {
+    async fn fresh_database_migrates_through_v1_to_v3() {
         let pool = SqliteConnectionPool::in_memory().await.unwrap();
 
         pool.write(|conn| run_migrations(conn)).await.unwrap();
 
         let version = pool.read(current_version).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
 
         let facts_exists: bool = pool
             .read(|conn| {
@@ -175,6 +191,17 @@ mod tests {
             })
             .unwrap();
         assert!(memory_items_exists);
+
+        let vectors_exists: bool = pool
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_vectors')",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(vectors_exists);
     }
 
     #[tokio::test]
@@ -196,7 +223,7 @@ mod tests {
         pool.write(|conn| run_migrations(conn)).await.unwrap();
 
         let version = pool.read(current_version).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
 
         let facts_count: i64 = pool
             .read(|conn| Ok(conn.query_row("SELECT count(*) FROM facts", [], |row| row.get(0))?))
